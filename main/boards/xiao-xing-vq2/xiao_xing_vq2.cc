@@ -9,11 +9,22 @@
 #include "mcp_server.h"
 #include "servo_dog_ctrl.h"
 
+#include <driver/gpio.h>
 #include <driver/i2c_master.h>
+#include <driver/ledc.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <vector>
+
+#ifdef SH1106
+#include <esp_lcd_panel_sh1106.h>
+#endif
 
 #if XIAO_XING_VQ2_ENABLE_LED_STRIP
 #include "driver/rmt_tx.h"
@@ -30,6 +41,10 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     bool dog_motion_enabled_ = false;
+
+#if XIAO_XING_VQ2_ENABLE_BRINGUP_TEST
+    AudioCodec* bringup_audio_codec_ = nullptr;
+#endif
 
 #if XIAO_XING_VQ2_ENABLE_LED_STRIP
     led_strip_handle_t led_strip_ = nullptr;
@@ -68,7 +83,7 @@ private:
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &display_i2c_bus_));
     }
 
-    void InitializeSsd1306Display() {
+    void InitializeOledDisplay() {
         esp_lcd_panel_io_i2c_config_t io_config = {
             .dev_addr = 0x3C,
             .on_color_trans_done = nullptr,
@@ -94,8 +109,13 @@ private:
         };
         panel_config.vendor_config = &ssd1306_config;
 
+#ifdef SH1106
+        ESP_LOGI(TAG, "Install SH1106 OLED driver");
+        ESP_ERROR_CHECK(esp_lcd_new_panel_sh1106(panel_io_, &panel_config, &panel_));
+#else
         ESP_LOGI(TAG, "Install SSD1306 OLED driver");
         ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(panel_io_, &panel_config, &panel_));
+#endif
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
         if (esp_lcd_panel_init(panel_) != ESP_OK) {
             ESP_LOGE(TAG, "OLED init failed; using NoDisplay fallback");
@@ -128,6 +148,168 @@ private:
         ESP_LOGI(TAG, "Dog motion disabled until VQ2 servo GPIOs are confirmed");
 #endif
     }
+
+#if XIAO_XING_VQ2_ENABLE_BRINGUP_TEST
+    void StartBringupTest() {
+        ESP_LOGW(TAG, "VQ2 bring-up test is enabled; application audio uses DummyAudioCodec during this boot");
+        xTaskCreate([](void* arg) {
+            auto* self = static_cast<XiaoXingVq2*>(arg);
+            self->RunBringupTest();
+            vTaskDelete(nullptr);
+        }, "vq2_bringup", 6144, this, 3, nullptr);
+    }
+
+    void SetBringupStatus(const char* status) {
+        ESP_LOGI(TAG, "BRINGUP: %s", status);
+        if (display_ != nullptr) {
+            display_->SetStatus(status);
+        }
+    }
+
+    void RunAudioBringupTest() {
+#if XIAO_XING_VQ2_ENABLE_AUDIO
+        SetBringupStatus("SPK TEST");
+        AudioCodec* codec = new NoAudioCodecSimplex(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
+            AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT,
+            AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
+        bringup_audio_codec_ = codec;
+        codec->Start();
+        codec->SetOutputVolume(60);
+
+        constexpr float kPi = 3.14159265358979323846f;
+        constexpr int kToneHz = 880;
+        const int tone_samples = AUDIO_OUTPUT_SAMPLE_RATE / 5;
+        std::vector<int16_t> tone(tone_samples);
+        for (int i = 0; i < tone_samples; ++i) {
+            float phase = 2.0f * kPi * kToneHz * i / AUDIO_OUTPUT_SAMPLE_RATE;
+            tone[i] = static_cast<int16_t>(std::sin(phase) * 9000);
+        }
+
+        codec->EnableOutput(true);
+        codec->OutputData(tone);
+        codec->EnableOutput(false);
+        vTaskDelay(pdMS_TO_TICKS(300));
+
+        SetBringupStatus("MIC RMS");
+        codec->EnableInput(true);
+        for (int window = 0; window < 8; ++window) {
+            std::vector<int16_t> samples(AUDIO_INPUT_SAMPLE_RATE / 10);
+            if (!codec->InputData(samples)) {
+                ESP_LOGW(TAG, "BRINGUP MIC window %d: no samples", window + 1);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+
+            int64_t sum_squares = 0;
+            int32_t peak = 0;
+            for (int16_t sample : samples) {
+                int32_t value = sample;
+                int32_t abs_value = value < 0 ? -value : value;
+                peak = std::max(peak, abs_value);
+                sum_squares += static_cast<int64_t>(value) * value;
+            }
+            int rms = static_cast<int>(std::sqrt(static_cast<double>(sum_squares) / samples.size()));
+            ESP_LOGI(TAG, "BRINGUP MIC window %d: rms=%d peak=%ld", window + 1, rms, static_cast<long>(peak));
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        codec->EnableInput(false);
+#endif
+    }
+
+    esp_err_t SetServoAngle(uint8_t channel, float angle) {
+        constexpr float kMaxAngle = 180.0f;
+        constexpr float kMinWidthUs = 500.0f;
+        constexpr float kMaxWidthUs = 2500.0f;
+        constexpr float kPwmFreqHz = 50.0f;
+        constexpr uint32_t kFullDuty = (1 << 10) - 1;
+
+        float pulse_width_us = angle / kMaxAngle * (kMaxWidthUs - kMinWidthUs) + kMinWidthUs;
+        uint32_t duty = static_cast<uint32_t>(kFullDuty * pulse_width_us * kPwmFreqHz / 1000000.0f);
+        esp_err_t ret = ledc_set_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(channel), duty);
+        ret |= ledc_update_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(channel));
+        return ret;
+    }
+
+    void CenterServos() {
+        for (uint8_t channel = 0; channel < 4; ++channel) {
+            SetServoAngle(channel, 90);
+        }
+        vTaskDelay(pdMS_TO_TICKS(350));
+    }
+
+    void RunServoBringupTest() {
+        if (!dog_motion_enabled_) {
+            ESP_LOGW(TAG, "BRINGUP SERVO: dog motion is disabled");
+            return;
+        }
+
+        struct ServoProbe {
+            const char* name;
+            gpio_num_t gpio;
+            uint8_t channel;
+        };
+
+        const ServoProbe probes[] = {
+            {"FL", FL_GPIO_NUM, 0},
+            {"FR", FR_GPIO_NUM, 1},
+            {"BL", BL_GPIO_NUM, 2},
+            {"BR", BR_GPIO_NUM, 3},
+        };
+
+        SetBringupStatus("SERVO TEST");
+        CenterServos();
+        for (const auto& probe : probes) {
+            char status[32];
+            snprintf(status, sizeof(status), "%s GPIO%d", probe.name, static_cast<int>(probe.gpio));
+            SetBringupStatus(status);
+            ESP_LOGI(TAG, "BRINGUP SERVO %s: GPIO%d LEDC channel %u",
+                probe.name, static_cast<int>(probe.gpio), probe.channel);
+
+            SetServoAngle(probe.channel, 70);
+            vTaskDelay(pdMS_TO_TICKS(450));
+            SetServoAngle(probe.channel, 110);
+            vTaskDelay(pdMS_TO_TICKS(450));
+            SetServoAngle(probe.channel, 90);
+            vTaskDelay(pdMS_TO_TICKS(700));
+        }
+        CenterServos();
+
+        SetBringupStatus("DOG CTRL");
+        dog_action_args_t args = {
+            .repeat_count = 1,
+            .speed = 80,
+            .hold_time_ms = NOT_USE,
+            .angle_offset = NOT_USE,
+        };
+        ESP_LOGI(TAG, "BRINGUP SERVO: servo_dog_ctrl_send(DOG_STATE_FORWARD)");
+        servo_dog_ctrl_send(DOG_STATE_FORWARD, &args);
+        vTaskDelay(pdMS_TO_TICKS(1600));
+        ESP_LOGI(TAG, "BRINGUP SERVO: servo_dog_ctrl_send(DOG_STATE_IDLE)");
+        servo_dog_ctrl_send(DOG_STATE_IDLE, NULL);
+        vTaskDelay(pdMS_TO_TICKS(700));
+    }
+
+    void RunBringupTest() {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        SetBringupStatus("VQ2 TEST");
+        ESP_LOGI(TAG, "BRINGUP display: SH1106 I2C SDA=%d SCL=%d size=%dx%d",
+            static_cast<int>(DISPLAY_SDA_PIN), static_cast<int>(DISPLAY_SCL_PIN),
+            DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        ESP_LOGI(TAG, "BRINGUP audio: spk_bclk=%d spk_ws=%d spk_dout=%d mic_sck=%d mic_ws=%d mic_din=%d",
+            static_cast<int>(AUDIO_I2S_SPK_GPIO_BCLK), static_cast<int>(AUDIO_I2S_SPK_GPIO_LRCK),
+            static_cast<int>(AUDIO_I2S_SPK_GPIO_DOUT), static_cast<int>(AUDIO_I2S_MIC_GPIO_SCK),
+            static_cast<int>(AUDIO_I2S_MIC_GPIO_WS), static_cast<int>(AUDIO_I2S_MIC_GPIO_DIN));
+        ESP_LOGI(TAG, "BRINGUP servos: FL=%d FR=%d BL=%d BR=%d tail=%d",
+            static_cast<int>(FL_GPIO_NUM), static_cast<int>(FR_GPIO_NUM),
+            static_cast<int>(BL_GPIO_NUM), static_cast<int>(BR_GPIO_NUM),
+            static_cast<int>(TAIL_GPIO_NUM));
+
+        RunAudioBringupTest();
+        RunServoBringupTest();
+        SetBringupStatus("TEST DONE");
+        ESP_LOGI(TAG, "BRINGUP complete");
+    }
+#endif
 
 #if XIAO_XING_VQ2_ENABLE_LED_STRIP
     esp_err_t ConfigureLedStrip(gpio_num_t gpio, bool clear_previous) {
@@ -335,16 +517,22 @@ public:
     XiaoXingVq2() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializeButtons();
         InitializeDisplayI2c();
-        InitializeSsd1306Display();
+        InitializeOledDisplay();
         InitializeDogMotion();
 #if XIAO_XING_VQ2_ENABLE_LED_STRIP
         InitializeLedStrip();
+#endif
+#if XIAO_XING_VQ2_ENABLE_BRINGUP_TEST
+        StartBringupTest();
 #endif
         InitializeTools();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-#if XIAO_XING_VQ2_ENABLE_AUDIO
+#if XIAO_XING_VQ2_ENABLE_BRINGUP_TEST
+        static DummyAudioCodec audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE);
+        return &audio_codec;
+#elif XIAO_XING_VQ2_ENABLE_AUDIO
         static NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT,
             AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);

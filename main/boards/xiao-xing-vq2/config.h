@@ -7,18 +7,17 @@
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
 
 /*
- * Preliminary VQ2 pin map.
+ * Xiao Xing VQ2 pin map.
  *
- * The photos confirm the device uses an ESP32-S3-N16R8 module, an I2C OLED
- * display, an I2S MEMS microphone, dog servos, and multiple RGB LEDs. Some
- * GPIO numbers still need hardware confirmation from the original firmware,
- * traces, or probe tests.
+ * Display, audio, and servo pins are based on the factory zzpet-s3 firmware
+ * image and confirmed on hardware. RGB/Lamp remains disabled because its data
+ * GPIO still needs separate probing.
  */
 #define XIAO_XING_VQ2_ENABLE_AUDIO      1
-#define XIAO_XING_VQ2_ENABLE_LED_STRIP  1
+#define XIAO_XING_VQ2_ENABLE_LED_STRIP  0
 #define XIAO_XING_VQ2_ENABLE_DOG_MOTION 1
+#define XIAO_XING_VQ2_ENABLE_BRINGUP_TEST 1
 
-/* Candidate pins from similar ESP32-S3 0.96" OLED + I2S microphone boards. */
 #define AUDIO_I2S_MIC_GPIO_WS   GPIO_NUM_4
 #define AUDIO_I2S_MIC_GPIO_SCK  GPIO_NUM_5
 #define AUDIO_I2S_MIC_GPIO_DIN  GPIO_NUM_6
@@ -28,29 +27,28 @@
 
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 
-/* Candidate OLED I2C pins. Confirm before treating as final. */
 #define DISPLAY_SDA_PIN GPIO_NUM_41
 #define DISPLAY_SCL_PIN GPIO_NUM_42
 #define DISPLAY_WIDTH   128
 #define DISPLAY_HEIGHT  64
+#define SH1106
 #define DISPLAY_MIRROR_X true
 #define DISPLAY_MIRROR_Y true
 
-/*
- * The board appears to have four RGB LEDs. Factory firmware strings expose a
- * GPIO9 hint, so start there, while the VQ2 board exposes a runtime LED GPIO
- * probe tool for confirming or changing the pin without reflashing.
- */
-#define RGB_LED_GPIO   GPIO_NUM_9
+/* RGB/Lamp data GPIO is not confirmed yet. Keep disabled for the boot test. */
+#define RGB_LED_GPIO   GPIO_NUM_NC
 #define RGB_LED_COUNT  4
 
 /*
- * Servo pins follow the ESP-HI dog layout for initial VQ2 testing. GPIO19/20
- * are also native USB pins on ESP32-S3, so this remains a bring-up hypothesis.
+ * Factory firmware exposes five oscillator slots:
+ * left_hide_leg=18, right_hide_leg=14, left_front_leg=17,
+ * right_front_leg=13, tail_leg=12. The retail VQ2 appears to populate four
+ * servos, so tail is kept as an optional probe pin.
  */
-#define FL_GPIO_NUM GPIO_NUM_21
-#define FR_GPIO_NUM GPIO_NUM_19
-#define BL_GPIO_NUM GPIO_NUM_20
-#define BR_GPIO_NUM GPIO_NUM_18
+#define FL_GPIO_NUM   GPIO_NUM_17
+#define FR_GPIO_NUM   GPIO_NUM_13
+#define BL_GPIO_NUM   GPIO_NUM_18
+#define BR_GPIO_NUM   GPIO_NUM_14
+#define TAIL_GPIO_NUM GPIO_NUM_12
 
 #endif // _BOARD_CONFIG_H_
