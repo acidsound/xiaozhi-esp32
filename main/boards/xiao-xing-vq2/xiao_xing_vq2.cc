@@ -12,6 +12,7 @@
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <driver/ledc.h>
+#include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
@@ -83,6 +84,28 @@ private:
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &display_i2c_bus_));
     }
 
+#ifdef SH1106
+    void ApplySh1106PanelConfig() {
+        // The managed SH1106 driver maps mirror_x to display reverse, so apply
+        // the VQ2 panel orientation and color mode explicitly after LVGL setup.
+        constexpr uint8_t kSetDisplayNormal = 0xA6;
+        constexpr uint8_t kSetDisplayReverse = 0xA7;
+        constexpr uint8_t kSetComScanNormal = 0xC0;
+        constexpr uint8_t kSetComScanReverse = 0xC8;
+        constexpr uint8_t kSetSegmentRemapNormal = 0xA0;
+        constexpr uint8_t kSetSegmentRemapInverse = 0xA1;
+
+        ESP_LOGI(TAG, "Apply VQ2 SH1106 config: segment_inverse=%d com_reverse=%d reverse_color=%d",
+            DISPLAY_SEGMENT_REMAP_INVERSE, DISPLAY_COM_SCAN_REVERSE, DISPLAY_REVERSE_COLOR);
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io_,
+            DISPLAY_SEGMENT_REMAP_INVERSE ? kSetSegmentRemapInverse : kSetSegmentRemapNormal, nullptr, 0));
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io_,
+            DISPLAY_COM_SCAN_REVERSE ? kSetComScanReverse : kSetComScanNormal, nullptr, 0));
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io_,
+            DISPLAY_REVERSE_COLOR ? kSetDisplayReverse : kSetDisplayNormal, nullptr, 0));
+    }
+#endif
+
     void InitializeOledDisplay() {
         esp_lcd_panel_io_i2c_config_t io_config = {
             .dev_addr = 0x3C,
@@ -126,6 +149,9 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
         display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
             DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+#ifdef SH1106
+        ApplySh1106PanelConfig();
+#endif
     }
 
     void InitializeDogMotion() {
@@ -277,13 +303,13 @@ private:
         SetBringupStatus("DOG CTRL");
         dog_action_args_t args = {
             .repeat_count = 1,
-            .speed = 80,
+            .speed = 20,
             .hold_time_ms = NOT_USE,
             .angle_offset = NOT_USE,
         };
         ESP_LOGI(TAG, "BRINGUP SERVO: servo_dog_ctrl_send(DOG_STATE_FORWARD)");
         servo_dog_ctrl_send(DOG_STATE_FORWARD, &args);
-        vTaskDelay(pdMS_TO_TICKS(1600));
+        vTaskDelay(pdMS_TO_TICKS(3200));
         ESP_LOGI(TAG, "BRINGUP SERVO: servo_dog_ctrl_send(DOG_STATE_IDLE)");
         servo_dog_ctrl_send(DOG_STATE_IDLE, NULL);
         vTaskDelay(pdMS_TO_TICKS(700));

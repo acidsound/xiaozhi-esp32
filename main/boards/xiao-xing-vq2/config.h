@@ -32,8 +32,11 @@
 #define DISPLAY_WIDTH   128
 #define DISPLAY_HEIGHT  64
 #define SH1106
-#define DISPLAY_MIRROR_X true
-#define DISPLAY_MIRROR_Y true
+#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_Y false
+#define DISPLAY_SEGMENT_REMAP_INVERSE false
+#define DISPLAY_COM_SCAN_REVERSE false
+#define DISPLAY_REVERSE_COLOR true
 
 /* RGB/Lamp data GPIO is not confirmed yet. Keep disabled for the boot test. */
 #define RGB_LED_GPIO   GPIO_NUM_NC
