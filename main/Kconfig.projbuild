@@ -173,6 +173,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_ESP_HI
         bool "Espressif ESP-HI"
         depends on IDF_TARGET_ESP32C3
+    config BOARD_TYPE_XIAO_XING_VQ2
+        bool "Xiao Xing VQ2"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_ESP_BOX_3
         bool "Espressif ESP-BOX-3"
         depends on IDF_TARGET_ESP32S3

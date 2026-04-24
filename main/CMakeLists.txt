@@ -253,8 +253,22 @@ elseif(CONFIG_BOARD_TYPE_ESP_SPOT_C5)
     set(BOARD_TYPE "esp-spot")
 elseif(CONFIG_BOARD_TYPE_ESP_HI)
     set(BOARD_TYPE "esp-hi")
+    set(CUSTOM_TEXT_FONT_TTF "${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-hi/fonts/Galmuri14.ttf")
+    set(CUSTOM_TEXT_FONT_NAME "font_galmuri14_15_1.bin")
+    set(CUSTOM_TEXT_FONT_SIZE 15)
+    set(CUSTOM_TEXT_FONT_BPP 1)
+    set(CUSTOM_TEXT_FONT_FULL_RANGE ON)
     # Set ESP_HI emoji directory for DEFAULT_ASSETS_EXTRA_FILES
     set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_BINARY_DIR}/emoji")
+elseif(CONFIG_BOARD_TYPE_XIAO_XING_VQ2)
+    set(BOARD_TYPE "xiao-xing-vq2")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
+    set(BUILTIN_ICON_FONT font_awesome_14_1)
+    set(CUSTOM_TEXT_FONT_TTF "${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-hi/fonts/Galmuri14.ttf")
+    set(CUSTOM_TEXT_FONT_NAME "font_galmuri14_15_1.bin")
+    set(CUSTOM_TEXT_FONT_SIZE 15)
+    set(CUSTOM_TEXT_FONT_BPP 1)
+    set(CUSTOM_TEXT_FONT_FULL_RANGE ON)
 elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     set(BOARD_TYPE "esp-vocat")
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
@@ -1094,6 +1108,29 @@ function(build_default_assets_bin)
         list(APPEND BUILD_ARGS "--extra_files" "${DEFAULT_ASSETS_EXTRA_FILES}")
     endif()
 
+    set(ASSETS_BUILD_DEPENDS
+        ${SDKCONFIG}
+        ${PROJECT_DIR}/scripts/build_default_assets.py
+    )
+
+    if(CUSTOM_TEXT_FONT_TTF)
+        if(EXISTS "${CUSTOM_TEXT_FONT_TTF}")
+            list(APPEND BUILD_ARGS
+                "--custom_text_font_ttf" "${CUSTOM_TEXT_FONT_TTF}"
+                "--custom_text_font_name" "${CUSTOM_TEXT_FONT_NAME}"
+                "--custom_text_font_size" "${CUSTOM_TEXT_FONT_SIZE}"
+                "--custom_text_font_bpp" "${CUSTOM_TEXT_FONT_BPP}"
+                "--custom_text_font_language_json" "${LANG_JSON}"
+            )
+            if(CUSTOM_TEXT_FONT_FULL_RANGE)
+                list(APPEND BUILD_ARGS "--custom_text_font_full_range")
+            endif()
+            list(APPEND ASSETS_BUILD_DEPENDS "${CUSTOM_TEXT_FONT_TTF}" "${LANG_JSON}")
+        else()
+            message(WARNING "Custom text font not found: ${CUSTOM_TEXT_FONT_TTF}")
+        endif()
+    endif()
+
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
     list(APPEND BUILD_ARGS "--xiaozhi_fonts_path" "${XIAOZHI_FONTS_PATH}")
 
@@ -1101,9 +1138,7 @@ function(build_default_assets_bin)
     add_custom_command(
         OUTPUT ${GENERATED_ASSETS_BIN}
         COMMAND python ${PROJECT_DIR}/scripts/build_default_assets.py ${BUILD_ARGS}
-        DEPENDS
-            ${SDKCONFIG}
-            ${PROJECT_DIR}/scripts/build_default_assets.py
+        DEPENDS ${ASSETS_BUILD_DEPENDS}
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM
     )

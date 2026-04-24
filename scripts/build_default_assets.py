@@ -14,9 +14,11 @@ import argparse
 import io
 import os
 import shutil
+import shlex
 import sys
 import json
 import struct
+import subprocess
 from datetime import datetime
 
 
@@ -706,6 +708,91 @@ def get_text_font_path(builtin_text_font, xiaozhi_fonts_path):
         return None
 
 
+def get_symbols_from_language_json(language_json_path):
+    """Collect the exact character set needed by a locale's system strings."""
+    if not language_json_path:
+        return None
+
+    if not os.path.exists(language_json_path):
+        raise FileNotFoundError(f"Language JSON file not found: {language_json_path}")
+
+    with open(language_json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    strings = data.get('strings', {})
+    symbols = sorted({char for value in strings.values() for char in value})
+    if not symbols:
+        raise ValueError(f"No symbols found in language JSON: {language_json_path}")
+
+    return ''.join(symbols)
+
+
+def get_lv_font_conv_command(cache_dir):
+    """Find the lv_font_conv fork that supports the cbin output format."""
+    env_cmd = os.environ.get('LV_FONT_CONV')
+    if env_cmd:
+        return shlex.split(env_cmd)
+
+    node = shutil.which('node')
+    npm = shutil.which('npm')
+    git = shutil.which('git')
+    if not node or not npm or not git:
+        raise RuntimeError('node, npm, and git are required to fetch 78/lv_font_conv')
+
+    tool_dir = os.path.join(cache_dir, 'lv_font_conv')
+    converter = os.path.join(tool_dir, 'lv_font_conv.js')
+    if not os.path.exists(converter):
+        if os.path.exists(tool_dir):
+            shutil.rmtree(tool_dir)
+        subprocess.run(
+            [git, 'clone', '--depth', '1', 'https://github.com/78/lv_font_conv.git', tool_dir],
+            check=True,
+        )
+
+    node_modules = os.path.join(tool_dir, 'node_modules')
+    if not os.path.exists(node_modules):
+        subprocess.run([npm, 'install', '--omit=dev'], cwd=tool_dir, check=True)
+
+    return [node, converter]
+
+
+def build_custom_text_font(ttf_path, output_dir, font_name, size, bpp, language_json_path, full_range=False):
+    """Build a cbin LVGL font from a TTF and locale-specific symbol subset."""
+    if not ttf_path:
+        return None
+
+    if not os.path.exists(ttf_path):
+        raise FileNotFoundError(f"Custom text font TTF not found: {ttf_path}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, font_name)
+
+    cache_dir = os.path.dirname(output_dir)
+    cmd = get_lv_font_conv_command(cache_dir) + [
+        '--force-fast-kern-format',
+        '--no-compress',
+        '--no-prefilter',
+        '--font', ttf_path,
+        '--format', 'cbin',
+        '--bpp', str(bpp),
+        '-o', output_path,
+        '--size', str(size),
+    ]
+    if full_range:
+        cmd += ['-r', '0x0-0xfffff']
+        symbols_count = 'full range'
+    else:
+        symbols = get_symbols_from_language_json(language_json_path)
+        cmd += ['--symbols', symbols]
+        symbols_count = len(symbols)
+
+    print(f"Building custom text font: {output_path}")
+    print(f"  source: {ttf_path}")
+    print(f"  size: {size}px, bpp: {bpp}, symbols: {symbols_count}")
+    subprocess.run(cmd, check=True)
+    return output_path
+
+
 def get_emoji_collection_path(default_emoji_collection, xiaozhi_fonts_path, project_root=None):
     """
     Get the emoji collection path if needed
@@ -817,6 +904,12 @@ def main():
     parser.add_argument('--esp_sr_model_path', help='Path to ESP-SR model directory')
     parser.add_argument('--xiaozhi_fonts_path', help='Path to xiaozhi-fonts component directory')
     parser.add_argument('--extra_files', help='Path to extra files directory to be included in assets')
+    parser.add_argument('--custom_text_font_ttf', help='Path to a TTF font to subset and package as text font')
+    parser.add_argument('--custom_text_font_name', default='custom_text_font.bin', help='Output filename for generated cbin text font')
+    parser.add_argument('--custom_text_font_size', type=int, default=15, help='Pixel size for generated cbin text font')
+    parser.add_argument('--custom_text_font_bpp', type=int, default=1, help='Bits per pixel for generated cbin text font')
+    parser.add_argument('--custom_text_font_language_json', help='Language JSON used to collect custom font symbols')
+    parser.add_argument('--custom_text_font_full_range', action='store_true', help='Include the full TTF glyph range instead of locale string subset')
     
     args = parser.parse_args()
     
@@ -875,6 +968,17 @@ def main():
     
     # Get text font path if needed
     text_font_path = get_text_font_path(args.builtin_text_font, args.xiaozhi_fonts_path)
+    if args.custom_text_font_ttf:
+        font_build_dir = os.path.join(os.path.dirname(args.output), "generated_fonts")
+        text_font_path = build_custom_text_font(
+            args.custom_text_font_ttf,
+            font_build_dir,
+            args.custom_text_font_name,
+            args.custom_text_font_size,
+            args.custom_text_font_bpp,
+            args.custom_text_font_language_json,
+            args.custom_text_font_full_range,
+        )
     
     # Get emoji collection path if needed
     # Calculate project root from script location for otto-gif support
