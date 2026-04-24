@@ -110,6 +110,10 @@ void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
     ESP_ERROR_CHECK(esp_timer_start_once(notification_timer_, duration_ms * 1000));
 }
 
+void LvglDisplay::SetClockMicroAnimationEnabled(bool enabled) {
+    clock_micro_animation_enabled_ = enabled;
+}
+
 void LvglDisplay::UpdateStatusBar(bool update_all) {
     auto& app = Application::GetInstance();
     auto& board = Board::GetInstance();
@@ -141,8 +145,16 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             // Check if the we have already set the time
             if (tm->tm_year >= 2025 - 1900) {
                 char time_str[16];
-                strftime(time_str, sizeof(time_str), "%H:%M", tm);
-                SetStatus(time_str);
+                strftime(time_str, sizeof(time_str),
+                    clock_micro_animation_enabled_ && (tm->tm_sec % 2 != 0) ? "%H %M" : "%H:%M", tm);
+                DisplayLockGuard lock(this);
+                if (status_label_ != nullptr) {
+                    lv_label_set_text(status_label_, time_str);
+                    lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+                    if (notification_label_ != nullptr) {
+                        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+                    }
+                }
             } else {
                 ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
             }

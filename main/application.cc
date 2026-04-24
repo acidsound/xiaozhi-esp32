@@ -112,18 +112,16 @@ void Application::Initialize() {
                     // Cellular network - registering without carrier info yet
                     display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
                 } else {
-                    // WiFi or cellular with carrier info
-                    std::string msg = Lang::Strings::CONNECT_TO;
-                    msg += data;
-                    msg += "...";
-                    display->ShowNotification(msg.c_str(), 30000);
+                    display->ShowNotification(Lang::Strings::CONNECT_TO, 30000);
+                    display->SetChatMessage("system", data.c_str());
                 }
                 break;
             }
             case NetworkEvent::Connected: {
-                std::string msg = Lang::Strings::CONNECTED_TO;
-                msg += data;
-                display->ShowNotification(msg.c_str(), 30000);
+                display->ShowNotification(Lang::Strings::CONNECTED_TO, 30000);
+                if (!data.empty()) {
+                    display->SetChatMessage("system", data.c_str());
+                }
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
                 break;
             }
