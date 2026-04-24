@@ -262,13 +262,13 @@ elseif(CONFIG_BOARD_TYPE_ESP_HI)
     set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_BINARY_DIR}/emoji")
 elseif(CONFIG_BOARD_TYPE_XIAO_XING_VQ2)
     set(BOARD_TYPE "xiao-xing-vq2")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
+    set(BUILTIN_TEXT_FONT font_galmuri14_15_1)
     set(BUILTIN_ICON_FONT font_awesome_14_1)
-    set(CUSTOM_TEXT_FONT_TTF "${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-hi/fonts/Galmuri14.ttf")
-    set(CUSTOM_TEXT_FONT_NAME "font_galmuri14_15_1.bin")
-    set(CUSTOM_TEXT_FONT_SIZE 15)
-    set(CUSTOM_TEXT_FONT_BPP 1)
-    set(CUSTOM_TEXT_FONT_FULL_RANGE ON)
+    set(CUSTOM_BUILTIN_TEXT_FONT_TTF "${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-hi/fonts/Galmuri14.ttf")
+    set(CUSTOM_BUILTIN_TEXT_FONT_NAME "font_galmuri14_15_1")
+    set(CUSTOM_BUILTIN_TEXT_FONT_SIZE 15)
+    set(CUSTOM_BUILTIN_TEXT_FONT_BPP 1)
+    set(CUSTOM_BUILTIN_TEXT_FONT_FULL_RANGE ON)
 elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     set(BOARD_TYPE "esp-vocat")
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
@@ -945,6 +945,38 @@ if(NOT LANG_DIR STREQUAL "en-US")
 endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
+
+set(CUSTOM_BUILTIN_TEXT_FONT_OUTPUT "")
+if(CUSTOM_BUILTIN_TEXT_FONT_TTF)
+    if(EXISTS "${CUSTOM_BUILTIN_TEXT_FONT_TTF}")
+        set(CUSTOM_BUILTIN_TEXT_FONT_OUTPUT
+            "${CMAKE_BINARY_DIR}/generated_fonts/${CUSTOM_BUILTIN_TEXT_FONT_NAME}.c")
+        set(CUSTOM_BUILTIN_TEXT_FONT_ARGS
+            "--ttf" "${CUSTOM_BUILTIN_TEXT_FONT_TTF}"
+            "--output" "${CUSTOM_BUILTIN_TEXT_FONT_OUTPUT}"
+            "--size" "${CUSTOM_BUILTIN_TEXT_FONT_SIZE}"
+            "--bpp" "${CUSTOM_BUILTIN_TEXT_FONT_BPP}"
+            "--language-json" "${LANG_JSON}"
+        )
+        if(CUSTOM_BUILTIN_TEXT_FONT_FULL_RANGE)
+            list(APPEND CUSTOM_BUILTIN_TEXT_FONT_ARGS "--full-range")
+        endif()
+        add_custom_command(
+            OUTPUT "${CUSTOM_BUILTIN_TEXT_FONT_OUTPUT}"
+            COMMAND python "${PROJECT_DIR}/scripts/build_lvgl_font.py" ${CUSTOM_BUILTIN_TEXT_FONT_ARGS}
+            DEPENDS
+                "${CUSTOM_BUILTIN_TEXT_FONT_TTF}"
+                "${LANG_JSON}"
+                "${PROJECT_DIR}/scripts/build_lvgl_font.py"
+                "${PROJECT_DIR}/scripts/build_default_assets.py"
+            COMMENT "Generating builtin LVGL text font ${CUSTOM_BUILTIN_TEXT_FONT_NAME}"
+            VERBATIM
+        )
+        list(APPEND SOURCES "${CUSTOM_BUILTIN_TEXT_FONT_OUTPUT}")
+    else()
+        message(FATAL_ERROR "Custom builtin text font not found: ${CUSTOM_BUILTIN_TEXT_FONT_TTF}")
+    endif()
+endif()
 
 # If target chip is ESP32, exclude specific files to avoid build errors
 if(CONFIG_IDF_TARGET_ESP32)

@@ -1,5 +1,6 @@
 #include "wifi_board.h"
 #include "application.h"
+#include "assets/lang_config.h"
 #include "button.h"
 #include "codecs/dummy_audio_codec.h"
 #include "codecs/no_audio_codec.h"
@@ -192,51 +193,116 @@ private:
         }
     }
 
-    void RunAudioBringupTest() {
 #if XIAO_XING_VQ2_ENABLE_AUDIO
-        SetBringupStatus("SPK TEST");
-        AudioCodec* codec = new NoAudioCodecSimplex(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT,
-            AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
-        bringup_audio_codec_ = codec;
-        codec->Start();
-        codec->SetOutputVolume(60);
+    AudioCodec* GetBringupAudioCodec() {
+        if (bringup_audio_codec_ == nullptr) {
+            auto* codec = new NoAudioCodecSimplex(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
+                AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT,
+                AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
+            bringup_audio_codec_ = codec;
+            codec->Start();
+            codec->SetOutputVolume(60);
+        }
+        return bringup_audio_codec_;
+    }
+#endif
 
+    void PlayBringupBeep(int tone_hz = 1320, int duration_ms = 120) {
+#if XIAO_XING_VQ2_ENABLE_AUDIO
+        AudioCodec* codec = GetBringupAudioCodec();
         constexpr float kPi = 3.14159265358979323846f;
-        constexpr int kToneHz = 880;
-        const int tone_samples = AUDIO_OUTPUT_SAMPLE_RATE / 5;
+        const int tone_samples = AUDIO_OUTPUT_SAMPLE_RATE * duration_ms / 1000;
         std::vector<int16_t> tone(tone_samples);
         for (int i = 0; i < tone_samples; ++i) {
-            float phase = 2.0f * kPi * kToneHz * i / AUDIO_OUTPUT_SAMPLE_RATE;
+            float phase = 2.0f * kPi * tone_hz * i / AUDIO_OUTPUT_SAMPLE_RATE;
             tone[i] = static_cast<int16_t>(std::sin(phase) * 9000);
         }
 
         codec->EnableOutput(true);
         codec->OutputData(tone);
         codec->EnableOutput(false);
+        vTaskDelay(pdMS_TO_TICKS(120));
+#else
+        (void)tone_hz;
+        (void)duration_ms;
+#endif
+    }
+
+    void RunAudioBringupTest() {
+#if XIAO_XING_VQ2_ENABLE_AUDIO
+        SetBringupStatus("SPK TEST");
+        AudioCodec* codec = GetBringupAudioCodec();
+        PlayBringupBeep(880, 200);
         vTaskDelay(pdMS_TO_TICKS(300));
 
-        SetBringupStatus("MIC RMS");
+        constexpr int kMicListenMs = 3000;
+        constexpr int kMicWindowMs = 200;
+        constexpr int kMicWindowSamples = AUDIO_INPUT_SAMPLE_RATE / 5;
+        constexpr int kMicWindowsPerAttempt = kMicListenMs / kMicWindowMs;
+        constexpr int kVoiceRmsThreshold = 250;
+        constexpr int kVoicePeakThreshold = 1200;
+        constexpr int kRequiredVoiceWindows = 2;
+
         codec->EnableInput(true);
-        for (int window = 0; window < 8; ++window) {
-            std::vector<int16_t> samples(AUDIO_INPUT_SAMPLE_RATE / 10);
-            if (!codec->InputData(samples)) {
-                ESP_LOGW(TAG, "BRINGUP MIC window %d: no samples", window + 1);
-                vTaskDelay(pdMS_TO_TICKS(100));
-                continue;
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        auto listen_for_voice = [&](int attempt) -> bool {
+            int voice_windows = 0;
+            int valid_windows = 0;
+            int max_rms = 0;
+            int32_t max_peak = 0;
+
+            for (int window = 0; window < kMicWindowsPerAttempt; ++window) {
+                std::vector<int16_t> samples(kMicWindowSamples);
+                if (!codec->InputData(samples)) {
+                    ESP_LOGW(TAG, "BRINGUP MIC attempt %d window %d/%d: no samples",
+                        attempt, window + 1, kMicWindowsPerAttempt);
+                    vTaskDelay(pdMS_TO_TICKS(kMicWindowMs));
+                    continue;
+                }
+
+                int64_t sum_squares = 0;
+                int64_t sum = 0;
+                int32_t peak = 0;
+                for (int16_t sample : samples) {
+                    int32_t value = sample;
+                    int32_t abs_value = value < 0 ? -value : value;
+                    peak = std::max(peak, abs_value);
+                    sum += value;
+                    sum_squares += static_cast<int64_t>(value) * value;
+                }
+                int rms = static_cast<int>(std::sqrt(static_cast<double>(sum_squares) / samples.size()));
+                int mean = static_cast<int>(sum / samples.size());
+                bool voice_detected = rms >= kVoiceRmsThreshold || peak >= kVoicePeakThreshold;
+                if (voice_detected) {
+                    ++voice_windows;
+                }
+                ++valid_windows;
+                max_rms = std::max(max_rms, rms);
+                max_peak = std::max(max_peak, peak);
+
+                ESP_LOGI(TAG, "BRINGUP MIC attempt %d window %d/%d: rms=%d peak=%ld mean=%d voice=%d",
+                    attempt, window + 1, kMicWindowsPerAttempt, rms, static_cast<long>(peak), mean, voice_detected);
             }
 
-            int64_t sum_squares = 0;
-            int32_t peak = 0;
-            for (int16_t sample : samples) {
-                int32_t value = sample;
-                int32_t abs_value = value < 0 ? -value : value;
-                peak = std::max(peak, abs_value);
-                sum_squares += static_cast<int64_t>(value) * value;
-            }
-            int rms = static_cast<int>(std::sqrt(static_cast<double>(sum_squares) / samples.size()));
-            ESP_LOGI(TAG, "BRINGUP MIC window %d: rms=%d peak=%ld", window + 1, rms, static_cast<long>(peak));
-            vTaskDelay(pdMS_TO_TICKS(100));
+            bool success = voice_windows >= kRequiredVoiceWindows;
+            ESP_LOGI(TAG, "BRINGUP MIC attempt %d summary: success=%d valid=%d voice_windows=%d max_rms=%d max_peak=%ld",
+                attempt, success, valid_windows, voice_windows, max_rms, static_cast<long>(max_peak));
+            return success;
+        };
+
+        SetBringupStatus(Lang::Strings::BRINGUP_MIC_PROMPT);
+        bool mic_detected = listen_for_voice(1);
+        if (!mic_detected) {
+            SetBringupStatus(Lang::Strings::BRINGUP_MIC_RETRY);
+            mic_detected = listen_for_voice(2);
+        }
+        if (mic_detected) {
+            SetBringupStatus(Lang::Strings::BRINGUP_MIC_SUCCESS);
+            vTaskDelay(pdMS_TO_TICKS(1200));
+        } else {
+            SetBringupStatus(Lang::Strings::BRINGUP_MIC_FAIL);
+            vTaskDelay(pdMS_TO_TICKS(1200));
         }
         codec->EnableInput(false);
 #endif
@@ -315,6 +381,49 @@ private:
         vTaskDelay(pdMS_TO_TICKS(700));
     }
 
+    void RunLedBringupTest() {
+#if XIAO_XING_VQ2_ENABLE_LED_STRIP
+        if (led_strip_ == nullptr) {
+            ESP_LOGW(TAG, "BRINGUP LED: RGB LED strip is not initialized");
+            return;
+        }
+
+        struct LedProbe {
+            const char* name;
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+        };
+
+        const LedProbe probes[] = {
+            {"RED", 0x40, 0x00, 0x00},
+            {"YELLOW", 0x40, 0x40, 0x00},
+            {"BLUE", 0x00, 0x00, 0x40},
+        };
+
+        SetBringupStatus("LED TEST");
+        ESP_LOGI(TAG, "BRINGUP LED: GPIO%d count=%d",
+            static_cast<int>(active_led_gpio_), RGB_LED_COUNT);
+        for (int i = 0; i < RGB_LED_COUNT; ++i) {
+            char status[16];
+            snprintf(status, sizeof(status), "LED %d", i);
+            SetBringupStatus(status);
+            ESP_LOGI(TAG, "BRINGUP LED index %d on GPIO%d", i, static_cast<int>(active_led_gpio_));
+            PlayBringupBeep();
+            for (const auto& probe : probes) {
+                ESP_LOGI(TAG, "BRINGUP LED index %d %s: rgb=(%u,%u,%u)",
+                    i, probe.name, probe.r, probe.g, probe.b);
+                ESP_ERROR_CHECK_WITHOUT_ABORT(led_strip_clear(led_strip_));
+                ESP_ERROR_CHECK_WITHOUT_ABORT(led_strip_set_pixel(led_strip_, i, probe.r, probe.g, probe.b));
+                ESP_ERROR_CHECK_WITHOUT_ABORT(led_strip_refresh(led_strip_));
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+        }
+        ESP_ERROR_CHECK_WITHOUT_ABORT(SetLedColor(0x00, 0x00, 0x00));
+        led_on_ = false;
+#endif
+    }
+
     void RunBringupTest() {
         vTaskDelay(pdMS_TO_TICKS(3000));
         SetBringupStatus("VQ2 TEST");
@@ -330,6 +439,7 @@ private:
             static_cast<int>(BL_GPIO_NUM), static_cast<int>(BR_GPIO_NUM),
             static_cast<int>(TAIL_GPIO_NUM));
 
+        RunLedBringupTest();
         RunAudioBringupTest();
         RunServoBringupTest();
         SetBringupStatus("TEST DONE");

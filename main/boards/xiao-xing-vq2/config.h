@@ -10,11 +10,11 @@
  * Xiao Xing VQ2 pin map.
  *
  * Display, audio, and servo pins are based on the factory zzpet-s3 firmware
- * image and confirmed on hardware. RGB/Lamp remains disabled because its data
- * GPIO still needs separate probing.
+ * image and confirmed on hardware. GPIO8 drives the two lower RGB LEDs;
+ * the other visible front LEDs may be separate circuits and still need confirmation.
  */
 #define XIAO_XING_VQ2_ENABLE_AUDIO      1
-#define XIAO_XING_VQ2_ENABLE_LED_STRIP  0
+#define XIAO_XING_VQ2_ENABLE_LED_STRIP  1
 #define XIAO_XING_VQ2_ENABLE_DOG_MOTION 1
 #define XIAO_XING_VQ2_ENABLE_BRINGUP_TEST 1
 
@@ -38,9 +38,9 @@
 #define DISPLAY_COM_SCAN_REVERSE false
 #define DISPLAY_REVERSE_COLOR true
 
-/* RGB/Lamp data GPIO is not confirmed yet. Keep disabled for the boot test. */
-#define RGB_LED_GPIO   GPIO_NUM_NC
-#define RGB_LED_COUNT  4
+/* GPIO8 confirmed with WS2812 red/yellow/blue bring-up test on the lower two LEDs. */
+#define RGB_LED_GPIO   GPIO_NUM_8
+#define RGB_LED_COUNT  2
 
 /*
  * Factory firmware exposes five oscillator slots:
