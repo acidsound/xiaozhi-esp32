@@ -127,6 +127,31 @@ The firmware connects to the official [xiaozhi.me](https://xiaozhi.me) server by
 - [MQTT + UDP Hybrid Communication Protocol Document](docs/mqtt-udp.md)
 - [A detailed WebSocket communication protocol document](docs/websocket.md)
 
+### Xiao Xing VQ2 Brave Search
+
+The `xiao-xing-vq2` board adds a device-side MCP web search tool backed by Brave Search. Configure it from the board web UI:
+
+1. Connect the device to Wi-Fi.
+2. Ask the device for its IP address, or check the serial log.
+3. Open `http://<device-ip>/`.
+4. Go to `Settings` > `Web Search`.
+
+The settings page supports two Brave API keys:
+
+- `Web Search API key`: the primary key used for normal web search. This is the right place for a deprecated Free Search key if your account still has one.
+- `LLM Context API key`: an optional key for Brave LLM Context. For most new Brave Search plan users, this can be the same key as the Web Search key.
+
+Search flow:
+
+1. Simple prompts such as "검색해줘", "알아봐줘", and "오늘 뉴스 알려줘" use the Web Search key.
+2. Deeper prompts such as "조사해줘", "자세히 알아봐줘", "근거까지 찾아봐줘", "출처 내용을 보고 요약해줘", and "비교해서 알려줘" use the LLM Context key when the checkbox is enabled.
+3. If Web Search returns a monthly quota exhaustion signal (`rate_limited` with the monthly `X-RateLimit-Remaining` value at `0`), and the LLM Context checkbox is enabled, the firmware retries with the LLM Context key.
+4. Per-second rate limits, network errors, and invalid Web Search keys do not automatically switch to the LLM Context key.
+
+To use LLM Context, enable a Brave Search plan that includes LLM Context in the Brave API dashboard, then save that key in the `LLM Context API key` field and enable the checkbox. If you want to avoid charges beyond the monthly free credits, set a monthly credit limit in the Brave account dashboard, for example `$5` when using the included `$5` monthly credits. The firmware does not keep its own monthly request counter because one API key may be shared by multiple clients; Brave's dashboard and rate-limit headers are the authoritative source. `X-RateLimit-Remaining` is read from each Brave API response, so no separate quota-only request is needed. When monthly remaining quota is 1% or less, the tool result asks the assistant to mention the remaining request count.
+
+API keys are treated as device-local secrets. The web settings endpoint and MCP config-status tool return only configured-state booleans, while the search tool uses the key internally as Brave's `X-Subscription-Token` header and does not include the key or raw upstream error bodies in MCP result JSON or logs.
+
 ## Large Model Configuration
 
 If you already have a XiaoZhi AI chatbot device and have connected to the official server, you can log in to the [xiaozhi.me](https://xiaozhi.me) console for configuration.
