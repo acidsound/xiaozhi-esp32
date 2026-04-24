@@ -268,7 +268,8 @@ elseif(CONFIG_BOARD_TYPE_XIAO_XING_VQ2)
     set(CUSTOM_BUILTIN_TEXT_FONT_NAME "font_galmuri14_15_1")
     set(CUSTOM_BUILTIN_TEXT_FONT_SIZE 15)
     set(CUSTOM_BUILTIN_TEXT_FONT_BPP 1)
-    set(CUSTOM_BUILTIN_TEXT_FONT_FULL_RANGE ON)
+    set(CUSTOM_BUILTIN_TEXT_FONT_RANGES
+        "0x20-0x7e,0x3130-0x318f,0xac00-0xd7a3,0x2000-0x206f,0x3000-0x303f,0xff00-0xffef")
 elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     set(BOARD_TYPE "esp-vocat")
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
@@ -960,6 +961,9 @@ if(CUSTOM_BUILTIN_TEXT_FONT_TTF)
         )
         if(CUSTOM_BUILTIN_TEXT_FONT_FULL_RANGE)
             list(APPEND CUSTOM_BUILTIN_TEXT_FONT_ARGS "--full-range")
+        elseif(CUSTOM_BUILTIN_TEXT_FONT_RANGES)
+            list(APPEND CUSTOM_BUILTIN_TEXT_FONT_ARGS
+                "--range" "${CUSTOM_BUILTIN_TEXT_FONT_RANGES}")
         endif()
         add_custom_command(
             OUTPUT "${CUSTOM_BUILTIN_TEXT_FONT_OUTPUT}"

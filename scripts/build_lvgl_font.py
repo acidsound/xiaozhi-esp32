@@ -14,6 +14,8 @@ def main():
     parser.add_argument("--bpp", type=int, default=1, help="Bits per pixel")
     parser.add_argument("--language-json", help="Language JSON used when not building full range")
     parser.add_argument("--full-range", action="store_true", help="Include the full TTF glyph range")
+    parser.add_argument("--range", dest="ranges", action="append",
+        help="Unicode range to include, for example 0x20-0x7e. Can be passed multiple times.")
     args = parser.parse_args()
 
     if not os.path.exists(args.ttf):
@@ -32,9 +34,16 @@ def main():
         "--size", str(args.size),
     ]
 
+    if args.full_range and args.ranges:
+        raise ValueError("--full-range and --range cannot be used together")
+
     if args.full_range:
         cmd += ["-r", "0x0-0xfffff"]
         symbols_count = "full range"
+    elif args.ranges:
+        ranges = ",".join(args.ranges)
+        cmd += ["-r", ranges]
+        symbols_count = ranges
     else:
         if not args.language_json:
             raise ValueError("--language-json is required when --full-range is not set")
