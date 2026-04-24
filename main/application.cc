@@ -477,6 +477,18 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2
+    if (ota_->HasWebsocketConfig()) {
+        ESP_LOGI(TAG, "Using WebSocket protocol for Xiao Xing VQ2");
+        protocol_ = std::make_unique<WebsocketProtocol>();
+    } else if (ota_->HasMqttConfig()) {
+        ESP_LOGW(TAG, "WebSocket config not found, falling back to MQTT");
+        protocol_ = std::make_unique<MqttProtocol>();
+    } else {
+        ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
+        protocol_ = std::make_unique<MqttProtocol>();
+    }
+#else
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig()) {
@@ -485,6 +497,7 @@ void Application::InitializeProtocol() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+#endif
 
     protocol_->OnConnected([this]() {
         DismissAlert();
@@ -1113,4 +1126,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-

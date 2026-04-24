@@ -16,7 +16,6 @@
 #define XIAO_XING_VQ2_ENABLE_AUDIO      1
 #define XIAO_XING_VQ2_ENABLE_LED_STRIP  1
 #define XIAO_XING_VQ2_ENABLE_DOG_MOTION 1
-#define XIAO_XING_VQ2_ENABLE_BRINGUP_TEST 1
 
 #define AUDIO_I2S_MIC_GPIO_WS   GPIO_NUM_4
 #define AUDIO_I2S_MIC_GPIO_SCK  GPIO_NUM_5
@@ -26,6 +25,8 @@
 #define AUDIO_I2S_SPK_GPIO_LRCK GPIO_NUM_16
 
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
+#define AUDIO_WAKE_BUTTON_GPIO  GPIO_NUM_NC
+#define MOVE_WAKE_BUTTON_GPIO   GPIO_NUM_NC
 
 #define DISPLAY_SDA_PIN GPIO_NUM_41
 #define DISPLAY_SCL_PIN GPIO_NUM_42
@@ -38,7 +39,7 @@
 #define DISPLAY_COM_SCAN_REVERSE false
 #define DISPLAY_REVERSE_COLOR true
 
-/* GPIO8 confirmed with WS2812 red/yellow/blue bring-up test on the lower two LEDs. */
+/* GPIO8 drives the confirmed lower two WS2812 LEDs. */
 #define RGB_LED_GPIO   GPIO_NUM_8
 #define RGB_LED_COUNT  2
 
