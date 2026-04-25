@@ -15,6 +15,33 @@ Confirmed hardware:
 The runtime implementation mirrors the ESP-HI dog and light controls while
 keeping the VQ2 display and I2S audio wiring.
 
+## Internet Radio
+
+VQ2 includes a local internet radio player backed by the public Radio Browser
+directory. It is intended to replace demo-like music playback with direct
+device-side MP3/AAC streaming.
+
+Available MCP tools:
+
+- `self.radio.search`: search Radio Browser stations. Use short English
+  keywords for genres when possible, for example `jazz`, `classical`, or
+  `news`.
+- `self.radio.play`: play a selected station from a search result.
+- `self.radio.play_random`: pick and play a random station, optionally filtered
+  by keyword.
+- `self.radio.stop`: stop the current radio stream.
+- `self.radio.status`: inspect playback state.
+
+The player accepts MP3, AAC, and AAC+ stations up to 192 kbps. Playback runs
+locally on the device, decodes the stream to PCM, downmixes to mono when needed,
+and resamples to the VQ2 speaker output rate.
+
+Radio playback is stopped by the BOOT button. If a wake word or another voice
+interaction starts while radio is playing, the radio player stops before the
+conversation opens so TTS/listening audio does not overlap with the stream. If a
+radio command is issued during an active conversation, playback is queued and
+starts when the device returns to idle.
+
 ## Brave Search
 
 This board exposes a device-side MCP search tool through `self.web.search`.

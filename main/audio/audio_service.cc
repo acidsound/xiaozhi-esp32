@@ -679,9 +679,9 @@ bool AudioService::IsIdle() {
     return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
 }
 
-void AudioService::WaitForPlaybackQueueEmpty() {
-    constexpr auto kPlaybackDrainTimeout = std::chrono::milliseconds(2500);
-    constexpr auto kPlaybackStableDelay = std::chrono::milliseconds(180);
+bool AudioService::WaitForPlaybackQueueEmpty(int timeout_ms) {
+    const auto kPlaybackDrainTimeout = std::chrono::milliseconds(timeout_ms);
+    constexpr auto kPlaybackStableDelay = std::chrono::milliseconds(450);
     auto deadline = std::chrono::steady_clock::now() + kPlaybackDrainTimeout;
 
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
@@ -696,7 +696,7 @@ void AudioService::WaitForPlaybackQueueEmpty() {
                     static_cast<unsigned>(audio_decode_queue_.size()),
                     static_cast<unsigned>(audio_playback_queue_.size()),
                     audio_output_active_);
-                return;
+                return false;
             }
             continue;
         }
@@ -704,14 +704,15 @@ void AudioService::WaitForPlaybackQueueEmpty() {
         if (!audio_queue_cv_.wait_until(lock, std::chrono::steady_clock::now() + kPlaybackStableDelay, [this]() {
                 return service_stopped_ || !audio_decode_queue_.empty() || !audio_playback_queue_.empty() || audio_output_active_;
             })) {
-            return;
+            return true;
         }
 
         if (std::chrono::steady_clock::now() >= deadline) {
             ESP_LOGW(TAG, "Playback stable wait timeout");
-            return;
+            return false;
         }
     }
+    return false;
 }
 
 void AudioService::ResetDecoder() {
@@ -728,6 +729,14 @@ void AudioService::ResetDecoder() {
     audio_queue_cv_.notify_all();
 }
 
+void AudioService::MarkOutputActivity() {
+    last_output_time_ = std::chrono::steady_clock::now();
+    if (audio_power_timer_ != nullptr) {
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+    }
+}
+
 void AudioService::CheckAndUpdateAudioPowerState() {
     auto now = std::chrono::steady_clock::now();
     auto input_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_input_time_).count();
@@ -737,7 +746,8 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     }
     if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
         // Keep TX clock when duplex RX is active; otherwise RX may stall on some boards.
-        if (!(codec_->duplex() && codec_->input_enabled())) {
+        if (!Board::GetInstance().IsExternalAudioOutputActive() &&
+                !(codec_->duplex() && codec_->input_enabled())) {
             codec_->EnableOutput(false);
         }
     }

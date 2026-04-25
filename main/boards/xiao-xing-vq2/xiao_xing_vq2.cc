@@ -6,6 +6,7 @@
 #include "config.h"
 #include "display/display.h"
 #include "display/oled_display.h"
+#include "internet_radio_player.h"
 #include "mcp_server.h"
 #include "servo_dog_ctrl.h"
 #include "settings.h"
@@ -25,7 +26,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "sdkconfig.h"
 
@@ -64,6 +67,13 @@ private:
     static constexpr const char* kBraveApiKeySetting = "brave_api_key";
     static constexpr const char* kBraveLlmContextApiKeySetting = "llm_ctx_key";
     static constexpr const char* kBraveUseLlmContextSetting = "use_llm_ctx";
+    static constexpr const char* kRadioBrowserBaseUrl = "https://all.api.radio-browser.info";
+    static constexpr const char* kRadioBrowserUserAgent =
+        "xiaozhi-esp32-vq2/0.1 (https://github.com/acidsound/xiaozhi-esp32)";
+    static constexpr int kRadioBrowserTimeoutMs = 5000;
+    static constexpr size_t kRadioBrowserMaxBodyBytes = 48 * 1024;
+    static constexpr int kRadioBrowserCandidateLimit = 24;
+    static constexpr int kRadioBrowserMaxBitrate = 192;
 
     Button boot_button_;
     Button audio_wake_button_;
@@ -72,6 +82,13 @@ private:
     i2c_master_bus_handle_t display_i2c_bus_ = nullptr;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
+    InternetRadioPlayer radio_player_;
+    std::mutex pending_radio_mutex_;
+    bool pending_radio_start_ = false;
+    std::string pending_radio_url_;
+    std::string pending_radio_name_;
+    std::string pending_radio_codec_;
+    std::string pending_radio_uuid_;
     bool dog_motion_enabled_ = false;
     bool web_server_initialized_ = false;
 
@@ -701,6 +718,426 @@ private:
         return web_result;
     }
 
+    static cJSON* MakeRadioError(const std::string& code, const std::string& message) {
+        auto root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", false);
+        cJSON_AddStringToObject(root, "code", code.c_str());
+        cJSON_AddStringToObject(root, "error", message.c_str());
+        return root;
+    }
+
+    static int JsonInt(const cJSON* item, const char* key, int default_value = 0) {
+        auto value = cJSON_GetObjectItem(item, key);
+        if (cJSON_IsNumber(value)) {
+            return value->valueint;
+        }
+        if (cJSON_IsBool(value)) {
+            return cJSON_IsTrue(value) ? 1 : 0;
+        }
+        return default_value;
+    }
+
+    static bool IsSupportedRadioCodec(const std::string& codec) {
+        std::string normalized = codec;
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+            [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        return normalized == "MP3" || normalized == "AAC" || normalized == "AAC+";
+    }
+
+    cJSON* RequestRadioBrowserJson(const std::string& path, std::string& error) {
+        std::string url = std::string(kRadioBrowserBaseUrl) + path;
+        auto http = GetNetwork()->CreateHttp(3);
+        http->SetTimeout(kRadioBrowserTimeoutMs);
+        http->SetHeader("Accept", "application/json");
+        http->SetHeader("Accept-Encoding", "identity");
+        http->SetHeader("User-Agent", kRadioBrowserUserAgent);
+
+        ESP_LOGD(TAG, "Radio Browser request: %s", url.c_str());
+        if (!http->Open("GET", url)) {
+            error = "Radio Browser API 연결에 실패했습니다.";
+            return nullptr;
+        }
+
+        int status_code = http->GetStatusCode();
+        if (status_code != 200) {
+            error = "Radio Browser API 오류: HTTP " + std::to_string(status_code);
+            http->Close();
+            return nullptr;
+        }
+
+        std::string body;
+        char buffer[1024];
+        while (true) {
+            int bytes_read = http->Read(buffer, sizeof(buffer));
+            if (bytes_read < 0) {
+                error = "Radio Browser API 응답을 읽는 중 시간이 초과됐습니다.";
+                http->Close();
+                return nullptr;
+            }
+            if (bytes_read == 0) {
+                break;
+            }
+            if (body.size() + bytes_read > kRadioBrowserMaxBodyBytes) {
+                error = "Radio Browser API 응답이 너무 큽니다.";
+                http->Close();
+                return nullptr;
+            }
+            body.append(buffer, bytes_read);
+        }
+        http->Close();
+
+        cJSON* response = cJSON_Parse(body.c_str());
+        if (response == nullptr) {
+            error = "Radio Browser API 응답을 JSON으로 해석할 수 없습니다.";
+            return nullptr;
+        }
+        return response;
+    }
+
+    int AppendRadioStations(cJSON* response, cJSON* stations, int max_results,
+            std::vector<std::string>& seen) {
+        if (!cJSON_IsArray(response)) {
+            return 0;
+        }
+
+        int added = 0;
+        cJSON* item = nullptr;
+        cJSON_ArrayForEach(item, response) {
+            if (cJSON_GetArraySize(stations) >= max_results) {
+                break;
+            }
+
+            if (JsonInt(item, "lastcheckok") == 0) {
+                continue;
+            }
+
+            std::string name = JsonString(item, "name");
+            std::string stream_url = JsonString(item, "url_resolved");
+            if (stream_url.empty()) {
+                stream_url = JsonString(item, "url");
+            }
+            std::string codec = JsonString(item, "codec");
+            int bitrate = JsonInt(item, "bitrate");
+            std::string uuid = JsonString(item, "stationuuid");
+            if (name.empty() || stream_url.empty() || !IsSupportedRadioCodec(codec)) {
+                continue;
+            }
+            if (bitrate > kRadioBrowserMaxBitrate) {
+                continue;
+            }
+            std::string dedupe_key = uuid.empty() ? stream_url : uuid;
+            if (std::find(seen.begin(), seen.end(), dedupe_key) != seen.end()) {
+                continue;
+            }
+            seen.push_back(dedupe_key);
+
+            auto station = cJSON_CreateObject();
+            cJSON_AddStringToObject(station, "name", name.c_str());
+            cJSON_AddStringToObject(station, "station_uuid", uuid.c_str());
+            cJSON_AddStringToObject(station, "stream_url", stream_url.c_str());
+            cJSON_AddStringToObject(station, "codec", codec.c_str());
+            cJSON_AddNumberToObject(station, "bitrate", bitrate);
+            cJSON_AddStringToObject(station, "country", JsonString(item, "country").c_str());
+            cJSON_AddStringToObject(station, "language", JsonString(item, "language").c_str());
+            cJSON_AddStringToObject(station, "tags", TrimmedUtf8(JsonString(item, "tags"), 180).c_str());
+            cJSON_AddNumberToObject(station, "votes", JsonInt(item, "votes"));
+            cJSON_AddNumberToObject(station, "click_count", JsonInt(item, "clickcount"));
+            cJSON_AddItemToArray(stations, station);
+            added++;
+        }
+        return added;
+    }
+
+    cJSON* SearchRadioBrowser(const std::string& query, int max_results, bool random) {
+        max_results = std::clamp(max_results, 1, 5);
+
+        auto root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddStringToObject(root, "provider", "radio_browser");
+        cJSON_AddStringToObject(root, "query", query.c_str());
+        cJSON_AddBoolToObject(root, "random", random);
+
+        auto stations = cJSON_CreateArray();
+        std::vector<std::string> seen;
+        std::string first_error;
+
+        auto fetch = [&](const std::string& selector, const std::string& value) {
+            if (cJSON_GetArraySize(stations) >= max_results) {
+                return;
+            }
+
+            std::string path = "/json/stations/search?limit=" + std::to_string(kRadioBrowserCandidateLimit)
+                + "&hidebroken=true&order=" + (random ? "random" : "clickcount");
+            if (!random) {
+                path += "&reverse=true";
+            }
+            if (!value.empty()) {
+                path += "&" + selector + "=" + UrlEncode(value);
+            }
+
+            std::string error;
+            cJSON* response = RequestRadioBrowserJson(path, error);
+            if (response == nullptr) {
+                if (first_error.empty()) {
+                    first_error = error;
+                }
+                return;
+            }
+            AppendRadioStations(response, stations, max_results, seen);
+            cJSON_Delete(response);
+        };
+
+        if (query.empty()) {
+            fetch("", "");
+        } else {
+            fetch("tag", query);
+            fetch("name", query);
+        }
+
+        int count = cJSON_GetArraySize(stations);
+        if (count == 0) {
+            cJSON_Delete(stations);
+            cJSON_Delete(root);
+            if (!first_error.empty()) {
+                return MakeRadioError("radio_browser_error", first_error);
+            }
+            return MakeRadioError("no_results", "재생 가능한 MP3/AAC 라디오 스테이션을 찾지 못했습니다.");
+        }
+
+        cJSON_AddNumberToObject(root, "count", count);
+        cJSON_AddStringToObject(root, "usage_hint",
+            "stations 배열의 항목 중 하나를 골라 self.radio.play에 station_name, stream_url, codec, station_uuid를 전달하세요.");
+        cJSON_AddItemToObject(root, "stations", stations);
+        return root;
+    }
+
+    void CountRadioStationClick(const std::string& station_uuid) {
+        if (station_uuid.empty()) {
+            return;
+        }
+        std::string error;
+        cJSON* response = RequestRadioBrowserJson("/json/url/" + station_uuid, error);
+        if (response != nullptr) {
+            cJSON_Delete(response);
+        } else {
+            ESP_LOGW(TAG, "Radio Browser click count failed: %s", error.c_str());
+        }
+    }
+
+    cJSON* GetRadioStatus() {
+        auto root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddBoolToObject(root, "playing", radio_player_.IsPlaying());
+
+        const char* state = "stopped";
+        switch (radio_player_.state()) {
+        case InternetRadioPlayer::State::Starting:
+            state = "starting";
+            break;
+        case InternetRadioPlayer::State::Playing:
+            state = "playing";
+            break;
+        case InternetRadioPlayer::State::Error:
+            state = "error";
+            break;
+        case InternetRadioPlayer::State::Stopped:
+        default:
+            state = "stopped";
+            break;
+        }
+
+        cJSON_AddStringToObject(root, "state", state);
+        cJSON_AddStringToObject(root, "station_name", radio_player_.station_name().c_str());
+        cJSON_AddStringToObject(root, "stream_url", radio_player_.stream_url().c_str());
+        cJSON_AddStringToObject(root, "codec", radio_player_.codec().c_str());
+        std::string error = radio_player_.last_error();
+        if (!error.empty()) {
+            cJSON_AddStringToObject(root, "error", error.c_str());
+        }
+        return root;
+    }
+
+    bool HasPendingRadioStart() {
+        std::lock_guard<std::mutex> lock(pending_radio_mutex_);
+        return pending_radio_start_;
+    }
+
+    void RequestEndInteractionForRadio() {
+        Application::GetInstance().Schedule([this]() {
+            auto& app = Application::GetInstance();
+            auto state = app.GetDeviceState();
+            ESP_LOGD(TAG, "Radio pending playback: end interaction, app state=%d",
+                static_cast<int>(state));
+            if (state == kDeviceStateListening) {
+                app.StopListening();
+            } else if (state == kDeviceStateSpeaking) {
+                ESP_LOGD(TAG, "Radio pending playback: wait for current TTS to finish");
+            } else if (state == kDeviceStateConnecting) {
+                app.SetDeviceState(kDeviceStateIdle);
+            }
+            app.Schedule([this]() {
+                auto state = Application::GetInstance().GetDeviceState();
+                ESP_LOGD(TAG, "Radio pending playback: follow-up, app state=%d pending=%d",
+                    static_cast<int>(state), HasPendingRadioStart() ? 1 : 0);
+                if (state == kDeviceStateIdle) {
+                    StartPendingRadioIfNeeded();
+                }
+            });
+        });
+    }
+
+    cJSON* MakeRadioPendingResponse(const std::string& stream_url, const std::string& station_name,
+            const std::string& codec) {
+        auto root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddBoolToObject(root, "pending", true);
+        cJSON_AddBoolToObject(root, "playing", true);
+        cJSON_AddBoolToObject(root, "local_async_start", true);
+        cJSON_AddStringToObject(root, "state", "starting");
+        cJSON_AddStringToObject(root, "playback_result", "accepted");
+        cJSON_AddStringToObject(root, "station_name", station_name.c_str());
+        cJSON_AddStringToObject(root, "stream_url", stream_url.c_str());
+        cJSON_AddStringToObject(root, "codec", codec.c_str());
+        cJSON_AddStringToObject(root, "response_hint",
+            "라디오 재생 요청은 성공적으로 접수되었습니다. 로컬 장치가 현재 대화를 끝낸 뒤 비동기로 재생합니다. 연결 실패라고 말하지 말고, 추가 TTS 응답 없이 대화를 종료하세요.");
+        return root;
+    }
+
+    cJSON* StartRadioPlaybackNow(const std::string& stream_url, const std::string& station_name,
+            const std::string& codec, const std::string& station_uuid) {
+        if (!IsSupportedRadioCodec(codec)) {
+            return MakeRadioError("unsupported_codec", "현재 라디오는 MP3/AAC 스트림만 재생할 수 있습니다.");
+        }
+
+        ESP_LOGI(TAG, "Radio playback start requested: name=%s codec=%s",
+            station_name.c_str(), codec.c_str());
+        ESP_LOGD(TAG, "Radio playback start url=%s", stream_url.c_str());
+        if (!radio_player_.Start(stream_url, station_name, codec)) {
+            ESP_LOGW(TAG, "Radio playback start failed before stream task: %s",
+                radio_player_.last_error().c_str());
+            return MakeRadioError("start_failed", radio_player_.last_error());
+        }
+        Application::GetInstance().SuppressAssistantOutputUntilNextUserInput();
+
+        CountRadioStationClick(station_uuid);
+        if (display_ != nullptr) {
+            display_->SetStatus("라디오");
+            display_->SetChatMessage("system", station_name.c_str());
+        }
+        return GetRadioStatus();
+    }
+
+    cJSON* StartRadioPlayback(const std::string& stream_url, const std::string& station_name,
+            const std::string& codec, const std::string& station_uuid) {
+        if (!IsSupportedRadioCodec(codec)) {
+            return MakeRadioError("unsupported_codec", "현재 라디오는 MP3/AAC 스트림만 재생할 수 있습니다.");
+        }
+
+        auto state = Application::GetInstance().GetDeviceState();
+        if (state == kDeviceStateIdle) {
+            return StartRadioPlaybackNow(stream_url, station_name, codec, station_uuid);
+        }
+        if (state != kDeviceStateListening && state != kDeviceStateSpeaking &&
+                state != kDeviceStateConnecting) {
+            return MakeRadioError("busy", "지금 상태에서는 라디오를 시작할 수 없습니다.");
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(pending_radio_mutex_);
+            pending_radio_start_ = true;
+            pending_radio_url_ = stream_url;
+            pending_radio_name_ = station_name;
+            pending_radio_codec_ = codec;
+            pending_radio_uuid_ = station_uuid;
+        }
+        ESP_LOGD(TAG, "Radio playback queued until idle: name=%s codec=%s url=%s state=%d",
+            station_name.c_str(), codec.c_str(), stream_url.c_str(), static_cast<int>(state));
+        RequestEndInteractionForRadio();
+        return MakeRadioPendingResponse(stream_url, station_name, codec);
+    }
+
+    cJSON* PlayRandomRadio(const std::string& query) {
+        cJSON* search = SearchRadioBrowser(query, 1, true);
+        if (!IsSearchOk(search)) {
+            return search;
+        }
+
+        cJSON* stations = cJSON_GetObjectItem(search, "stations");
+        cJSON* station = cJSON_IsArray(stations) ? cJSON_GetArrayItem(stations, 0) : nullptr;
+        if (station == nullptr) {
+            cJSON_Delete(search);
+            return MakeRadioError("no_results", "재생 가능한 라디오 스테이션을 찾지 못했습니다.");
+        }
+
+        std::string name = JsonString(station, "name");
+        std::string stream_url = JsonString(station, "stream_url");
+        std::string codec = JsonString(station, "codec");
+        std::string uuid = JsonString(station, "station_uuid");
+        cJSON_Delete(search);
+        return StartRadioPlayback(stream_url, name, codec, uuid);
+    }
+
+    void StartPendingRadioIfNeeded() {
+        std::string stream_url;
+        std::string station_name;
+        std::string codec;
+        std::string station_uuid;
+        {
+            std::lock_guard<std::mutex> lock(pending_radio_mutex_);
+            if (!pending_radio_start_) {
+                return;
+            }
+            pending_radio_start_ = false;
+            stream_url = pending_radio_url_;
+            station_name = pending_radio_name_;
+            codec = pending_radio_codec_;
+            station_uuid = pending_radio_uuid_;
+            pending_radio_url_.clear();
+            pending_radio_name_.clear();
+            pending_radio_codec_.clear();
+            pending_radio_uuid_.clear();
+        }
+
+        ESP_LOGD(TAG, "Starting pending radio playback: name=%s codec=%s url=%s",
+            station_name.c_str(), codec.c_str(), stream_url.c_str());
+        cJSON* result = StartRadioPlaybackNow(stream_url, station_name, codec, station_uuid);
+        cJSON_Delete(result);
+    }
+
+    bool StopRadioPlayback(bool update_display = true) {
+        bool was_playing = radio_player_.IsPlaying();
+        radio_player_.Stop();
+        if (was_playing) {
+            Application::GetInstance().GetAudioService().MarkOutputActivity();
+            vTaskDelay(pdMS_TO_TICKS(180));
+        }
+        if (display_ != nullptr) {
+            if (update_display) {
+                display_->SetStatus("대기");
+            }
+            display_->SetChatMessage("system", "");
+        }
+        return was_playing;
+    }
+
+    void OnRadioPlaybackStopped(InternetRadioPlayer::State final_state, const std::string& error) {
+        Application::GetInstance().Schedule([this, final_state, error]() {
+            if (radio_player_.IsPlaying()) {
+                return;
+            }
+            ESP_LOGD(TAG, "Radio playback stopped callback: state=%d error=%s",
+                static_cast<int>(final_state), error.c_str());
+            if (final_state == InternetRadioPlayer::State::Error && !error.empty()) {
+                ESP_LOGW(TAG, "Radio playback ended with error: %s", error.c_str());
+            }
+            if (display_ != nullptr &&
+                    Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+                display_->SetStatus("대기");
+                display_->SetChatMessage("system", "");
+            }
+        });
+    }
+
 #ifdef CONFIG_ESP_HI_WEB_CONTROL_ENABLED
     static void EnsureServoControlNvsValue(nvs_handle_t handle, const char* key) {
         int32_t value = 0;
@@ -812,6 +1249,11 @@ private:
         static int gesture_state = 0;
 
         boot_button_.OnClick([this]() {
+            if (radio_player_.IsPlaying()) {
+                StopRadioPlayback();
+                return;
+            }
+
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
@@ -1183,6 +1625,58 @@ private:
                 return GetWebSearchConfigStatus();
             });
 
+        mcp_server.AddTool("self.radio.search",
+            "Radio Browser에서 인터넷 라디오 스테이션을 검색합니다. 사용자가 라디오, 음악, 재즈/클래식/뉴스 같은 장르 라디오를 찾거나 틀어달라고 하면 이 도구를 사용하세요. query는 가능하면 짧은 영어 장르/스테이션 키워드로 넣으세요. 결과에서 MP3/AAC 스테이션 하나를 고른 뒤 재생하려면 self.radio.play를 호출하세요.",
+            PropertyList({
+                Property("query", kPropertyTypeString, ""),
+                Property("max_results", kPropertyTypeInteger, 3, 1, 5),
+            }), [this](const PropertyList& properties) -> ReturnValue {
+                std::string query = properties["query"].value<std::string>();
+                int max_results = properties["max_results"].value<int>();
+                return SearchRadioBrowser(query, max_results, false);
+            });
+
+        mcp_server.AddTool("self.radio.play",
+            "인터넷 라디오 스트림을 재생합니다. stream_url은 self.radio.search 결과의 stream_url 값을 사용하세요. 라디오가 재생 중일 때 버튼이나 wake word로 대화를 시작하면 재생은 중지됩니다.",
+            PropertyList({
+                Property("stream_url", kPropertyTypeString),
+                Property("station_name", kPropertyTypeString, "Internet Radio"),
+                Property("codec", kPropertyTypeString, "MP3"),
+                Property("station_uuid", kPropertyTypeString, ""),
+            }), [this](const PropertyList& properties) -> ReturnValue {
+                std::string stream_url = properties["stream_url"].value<std::string>();
+                std::string station_name = properties["station_name"].value<std::string>();
+                std::string codec = properties["codec"].value<std::string>();
+                std::string station_uuid = properties["station_uuid"].value<std::string>();
+                return StartRadioPlayback(stream_url, station_name, codec, station_uuid);
+            });
+
+        mcp_server.AddTool("self.radio.play_random",
+            "Radio Browser에서 조건에 맞는 인터넷 라디오 스테이션을 임의로 골라 바로 재생합니다. 사용자가 '랜덤 라디오 틀어줘', '재즈 라디오 아무거나 틀어줘'처럼 요청하면 이 도구를 사용하세요. query는 비워도 되고, 장르가 있으면 가능하면 영어 키워드로 넣으세요.",
+            PropertyList({
+                Property("query", kPropertyTypeString, ""),
+            }), [this](const PropertyList& properties) -> ReturnValue {
+                std::string query = properties["query"].value<std::string>();
+                return PlayRandomRadio(query);
+            });
+
+        mcp_server.AddTool("self.radio.stop",
+            "현재 재생 중인 인터넷 라디오를 중지합니다. 사용자가 라디오/음악을 꺼달라거나 중지해달라고 하면 이 도구를 사용하세요.",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                StopRadioPlayback();
+                return GetRadioStatus();
+            });
+
+        mcp_server.AddTool("self.radio.status",
+            "현재 인터넷 라디오 재생 상태를 확인합니다.",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                return GetRadioStatus();
+            });
+
         mcp_server.AddTool("self.dog.basic_control", "로봇 강아지의 기본 동작 제어. 사용할 수 있는 동작:\n"
             "forward: 앞으로 이동\nbackward: 뒤로 이동\nturn_left: 왼쪽으로 회전\n"
             "turn_right: 오른쪽으로 회전\nstop: 현재 동작 즉시 정지\n"
@@ -1327,12 +1821,38 @@ public:
         boot_button_(BOOT_BUTTON_GPIO),
         audio_wake_button_(AUDIO_WAKE_BUTTON_GPIO),
         move_wake_button_(MOVE_WAKE_BUTTON_GPIO) {
+        radio_player_.SetOnStopped([this](InternetRadioPlayer::State final_state,
+                const std::string& error) {
+            OnRadioPlaybackStopped(final_state, error);
+        });
         InitializeButtons();
         InitializeDisplayI2c();
         InitializeOledDisplay();
         InitializeDogMotion();
         InitializeIot();
         InitializeTools();
+    }
+
+    virtual void OnAudioInteractionStarting() override {
+        StopRadioPlayback(false);
+        SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    }
+
+    virtual void OnAudioInteractionFinished() override {
+        StartPendingRadioIfNeeded();
+    }
+
+    virtual bool OnTtsPlaybackFinished() override {
+        if (!HasPendingRadioStart()) {
+            return false;
+        }
+        ESP_LOGD(TAG, "Radio pending playback: TTS finished, entering idle before radio start");
+        Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+        return true;
+    }
+
+    virtual bool IsExternalAudioOutputActive() override {
+        return radio_player_.IsPlaying();
     }
 
     virtual AudioCodec* GetAudioCodec() override {

@@ -215,7 +215,7 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
 }
 
 int NoAudioCodec::Write(const int16_t* data, int samples) {
-    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    std::lock_guard<std::mutex> lock(tx_mutex_);
     std::vector<int32_t> buffer(samples);
 
     // output_volume_: 0-100
@@ -238,6 +238,7 @@ int NoAudioCodec::Write(const int16_t* data, int samples) {
 }
 
 int NoAudioCodec::Read(int16_t* dest, int samples) {
+    std::lock_guard<std::mutex> lock(rx_mutex_);
     size_t bytes_read;
     constexpr TickType_t kReadTimeoutTicks = pdMS_TO_TICKS(200);
 
@@ -255,7 +256,7 @@ int NoAudioCodec::Read(int16_t* dest, int samples) {
 }
 
 void NoAudioCodec::EnableInput(bool enable) {
-    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    std::lock_guard<std::mutex> lock(rx_mutex_);
     if (enable == input_enabled_) {
         return;
     }
@@ -268,7 +269,7 @@ void NoAudioCodec::EnableInput(bool enable) {
 }
 
 void NoAudioCodec::EnableOutput(bool enable) {
-    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    std::lock_guard<std::mutex> lock(tx_mutex_);
     if (enable == output_enabled_) {
         return;
     }

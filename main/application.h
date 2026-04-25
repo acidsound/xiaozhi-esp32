@@ -10,6 +10,7 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -112,6 +113,7 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+    void SuppressAssistantOutputUntilNextUserInput();
     
     /**
      * Reset protocol resources (thread-safe)
@@ -141,6 +143,7 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_connecting_ = false;
     bool play_popup_on_listening_ = false;  // Fallback for paths that enter listening without a connecting state
+    std::atomic<bool> suppress_assistant_output_until_user_input_{false};
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -156,6 +159,8 @@ private:
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void BeginAudioInteraction();
+    void ClearAssistantOutputSuppression(const char* reason);
 
     // Activation task (runs in background)
     void ActivationTask();

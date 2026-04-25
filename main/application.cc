@@ -511,6 +511,9 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+        if (Board::GetInstance().IsExternalAudioOutputActive()) {
+            return;
+        }
         if (GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
@@ -525,8 +528,18 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        if (board.IsExternalAudioOutputActive()) {
+            board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        } else {
+            board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        }
         Schedule([this]() {
+            if (Board::GetInstance().IsExternalAudioOutputActive()) {
+                if (GetDeviceState() != kDeviceStateIdle) {
+                    SetDeviceState(kDeviceStateIdle);
+                }
+                return;
+            }
             if (GetDeviceState() == kDeviceStateSpeaking) {
                 audio_service_.WaitForPlaybackQueueEmpty();
             }
@@ -543,13 +556,27 @@ void Application::InitializeProtocol() {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
+                    if (Board::GetInstance().IsExternalAudioOutputActive() ||
+                            suppress_assistant_output_until_user_input_.load()) {
+                        ESP_LOGD(TAG, "Suppress TTS while external audio output or handoff suppressor is active");
+                        AbortSpeaking(kAbortReasonNone);
+                        audio_service_.ResetDecoder();
+                        SetDeviceState(kDeviceStateIdle);
+                        return;
+                    }
+                    audio_service_.MarkOutputActivity();
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        audio_service_.WaitForPlaybackQueueEmpty();
+                        if (!audio_service_.WaitForPlaybackQueueEmpty()) {
+                            ESP_LOGW(TAG, "TTS playback did not drain cleanly before state transition");
+                        }
+                        if (Board::GetInstance().OnTtsPlaybackFinished()) {
+                            return;
+                        }
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
@@ -560,6 +587,12 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
+                    if (Board::GetInstance().IsExternalAudioOutputActive() ||
+                            suppress_assistant_output_until_user_input_.load()) {
+                        ESP_LOGD(TAG, "Suppress assistant text while external audio output or handoff suppressor is active: %s",
+                            text->valuestring);
+                        return;
+                    }
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([display, message = std::string(text->valuestring)]() {
                         display->SetChatMessage("assistant", message.c_str());
@@ -569,6 +602,7 @@ void Application::InitializeProtocol() {
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
+                ClearAssistantOutputSuppression("stt");
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 Schedule([display, message = std::string(text->valuestring)]() {
                     display->SetChatMessage("user", message.c_str());
@@ -712,6 +746,7 @@ void Application::HandleToggleChatEvent() {
     }
 
     if (state == kDeviceStateIdle) {
+        BeginAudioInteraction();
         ListeningMode mode = GetDefaultListeningMode();
         if (!protocol_->IsAudioChannelOpened()) {
             play_popup_on_connecting_ = true;
@@ -763,6 +798,7 @@ void Application::HandleStartListeningEvent() {
     }
     
     if (state == kDeviceStateIdle) {
+        BeginAudioInteraction();
         if (!protocol_->IsAudioChannelOpened()) {
             play_popup_on_connecting_ = true;
             SetDeviceState(kDeviceStateConnecting);
@@ -804,6 +840,7 @@ void Application::HandleWakeWordDetectedEvent() {
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {
+        BeginAudioInteraction();
         audio_service_.EncodeWakeWord();
         auto wake_word = audio_service_.GetLastWakeWord();
 
@@ -843,7 +880,9 @@ void Application::HandleWakeWordDetectedEvent() {
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting) {
+    auto state = GetDeviceState();
+    if (state != kDeviceStateConnecting &&
+            !(state == kDeviceStateIdle && protocol_->IsAudioChannelOpened())) {
         return;
     }
 
@@ -883,6 +922,7 @@ void Application::HandleStateChangedEvent() {
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
+            board.OnAudioInteractionFinished();
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
@@ -1046,6 +1086,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     auto state = GetDeviceState();
     
     if (state == kDeviceStateIdle) {
+        BeginAudioInteraction();
         audio_service_.EncodeWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {
@@ -1127,6 +1168,21 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
+}
+
+void Application::SuppressAssistantOutputUntilNextUserInput() {
+    suppress_assistant_output_until_user_input_ = true;
+}
+
+void Application::ClearAssistantOutputSuppression(const char* reason) {
+    if (suppress_assistant_output_until_user_input_.exchange(false)) {
+        ESP_LOGD(TAG, "Clear assistant output suppression: %s", reason);
+    }
+}
+
+void Application::BeginAudioInteraction() {
+    ClearAssistantOutputSuppression("audio interaction starting");
+    Board::GetInstance().OnAudioInteractionStarting();
 }
 
 void Application::ResetProtocol() {
