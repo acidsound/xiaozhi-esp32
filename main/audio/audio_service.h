@@ -171,6 +171,7 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    bool audio_output_active_ = false;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 

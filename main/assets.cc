@@ -259,6 +259,30 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
     }
 
+    cJSON* fallback_font = cJSON_GetObjectItem(root, "text_font_fallback");
+    if (cJSON_IsString(fallback_font)) {
+        std::string fallback_font_file = fallback_font->valuestring;
+        if (assets->GetAssetData(fallback_font_file, ptr, size)) {
+            auto text_font_fallback = std::make_shared<LvglCBinFont>(ptr);
+            if (text_font_fallback->font() == nullptr) {
+                ESP_LOGE(TAG, "Failed to load fallback font %s", fallback_font_file.c_str());
+                return false;
+            }
+            if (light_theme != nullptr && light_theme->text_font() != nullptr) {
+                if (auto cbin_font = std::dynamic_pointer_cast<LvglCBinFont>(light_theme->text_font())) {
+                    cbin_font->SetFallback(text_font_fallback);
+                }
+            }
+            if (dark_theme != nullptr && dark_theme->text_font() != nullptr) {
+                if (auto cbin_font = std::dynamic_pointer_cast<LvglCBinFont>(dark_theme->text_font())) {
+                    cbin_font->SetFallback(text_font_fallback);
+                }
+            }
+        } else {
+            ESP_LOGE(TAG, "The fallback font file %s is not found", fallback_font_file.c_str());
+        }
+    }
+
     cJSON* emoji_collection = cJSON_GetObjectItem(root, "emoji_collection");
     if (cJSON_IsArray(emoji_collection)) {
         auto custom_emoji_collection = std::make_shared<EmojiCollection>();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lvgl.h>
+#include <memory>
 
 
 class LvglFont {
@@ -25,7 +26,9 @@ public:
     LvglCBinFont(void* data);
     virtual ~LvglCBinFont();
     virtual const lv_font_t* font() const override { return font_; }
+    void SetFallback(std::shared_ptr<LvglFont> fallback);
 
 private:
     lv_font_t* font_;
+    std::shared_ptr<LvglFont> fallback_;
 };

@@ -50,7 +50,7 @@ def get_sound_files(directory):
         return []
     return [f for f in os.listdir(directory) if f.endswith('.ogg')]
 
-def generate_header(lang_code, output_path):
+def generate_header(lang_code, output_path, asset_sounds=False):
     # 从输出路径推导项目结构
     # output_path 通常是 main/assets/lang_config.h
     main_dir = os.path.dirname(output_path)  # main/assets
@@ -135,13 +135,10 @@ def generate_header(lang_code, output_path):
     # 生成语言特定音效常量
     for file in sorted(all_sound_files):
         base_name = os.path.splitext(file)[0]
-        # 优先使用当前语言的音效，如果不存在则回退到 en-US
-        if file in current_sounds:
-            sound_lang = lang_code.replace('-', '_').lower()
+        if asset_sounds:
+            sounds.append(f'        static constexpr std::string_view OGG_{base_name.upper()} = "{file}";')
         else:
-            sound_lang = 'en_us'
-            
-        sounds.append(f'''
+            sounds.append(f'''
         extern const char ogg_{base_name}_start[] asm("_binary_{base_name}_ogg_start");
         extern const char ogg_{base_name}_end[] asm("_binary_{base_name}_ogg_end");
         static const std::string_view OGG_{base_name.upper()} {{
@@ -152,7 +149,10 @@ def generate_header(lang_code, output_path):
     # 生成公共音效常量
     for file in sorted(common_sounds):
         base_name = os.path.splitext(file)[0]
-        sounds.append(f'''
+        if asset_sounds:
+            sounds.append(f'        static constexpr std::string_view OGG_{base_name.upper()} = "{file}";')
+        else:
+            sounds.append(f'''
         extern const char ogg_{base_name}_start[] asm("_binary_{base_name}_ogg_start");
         extern const char ogg_{base_name}_end[] asm("_binary_{base_name}_ogg_end");
         static const std::string_view OGG_{base_name.upper()} {{
@@ -177,10 +177,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate language configuration header file with en-US fallback")
     parser.add_argument("--language", required=True, help="Language code (e.g: zh-CN, en-US, ja-JP)")
     parser.add_argument("--output", required=True, help="Output header file path")
+    parser.add_argument("--asset-sounds", action="store_true", help="Generate sound constants as asset filenames")
     args = parser.parse_args()
 
     try:
-        generate_header(args.language, args.output)
+        generate_header(args.language, args.output, args.asset_sounds)
         print(f"Successfully generated language config file: {args.output}")
     except Exception as e:
         print(f"Error: {e}")

@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include "assets.h"
 #include <esp_log.h>
 #include <cstring>
 
@@ -297,6 +298,7 @@ void AudioService::AudioOutputTask() {
 
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
+        audio_output_active_ = true;
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -314,11 +316,16 @@ void AudioService::AudioOutputTask() {
 
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
+        lock.lock();
         if (task->timestamp > 0) {
-            lock.lock();
             timestamp_queue_.push_back(task->timestamp);
         }
+#else
+        lock.lock();
 #endif
+        audio_output_active_ = false;
+        audio_queue_cv_.notify_all();
+        lock.unlock();
     }
 
     ESP_LOGW(TAG, "Audio output task stopped");
@@ -631,6 +638,10 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
 }
 
 void AudioService::PlaySound(const std::string_view& ogg) {
+    if (ogg.empty()) {
+        return;
+    }
+
     if (!codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
@@ -639,6 +650,16 @@ void AudioService::PlaySound(const std::string_view& ogg) {
 
     const auto* buf = reinterpret_cast<const uint8_t*>(ogg.data());
     size_t size = ogg.size();
+    void* asset_ptr = nullptr;
+    size_t asset_size = 0;
+    if (size < 4 || std::memcmp(buf, "OggS", 4) != 0) {
+        if (!Assets::GetInstance().GetAssetData(std::string(ogg), asset_ptr, asset_size)) {
+            ESP_LOGW(TAG, "Sound asset not found: %.*s", static_cast<int>(ogg.size()), ogg.data());
+            return;
+        }
+        buf = static_cast<const uint8_t*>(asset_ptr);
+        size = asset_size;
+    }
 
     auto demuxer = std::make_unique<OggDemuxer>();
     demuxer->OnDemuxerFinished([this](const uint8_t* data, int sample_rate, size_t size){
@@ -659,10 +680,38 @@ bool AudioService::IsIdle() {
 }
 
 void AudioService::WaitForPlaybackQueueEmpty() {
+    constexpr auto kPlaybackDrainTimeout = std::chrono::milliseconds(2500);
+    constexpr auto kPlaybackStableDelay = std::chrono::milliseconds(180);
+    auto deadline = std::chrono::steady_clock::now() + kPlaybackDrainTimeout;
+
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    audio_queue_cv_.wait(lock, [this]() { 
-        return service_stopped_ || (audio_decode_queue_.empty() && audio_playback_queue_.empty()); 
-    });
+    while (!service_stopped_) {
+        bool drained = audio_decode_queue_.empty() && audio_playback_queue_.empty() && !audio_output_active_;
+        if (!drained) {
+            if (!audio_queue_cv_.wait_until(lock, deadline, [this]() {
+                    return service_stopped_ ||
+                        (audio_decode_queue_.empty() && audio_playback_queue_.empty() && !audio_output_active_);
+                })) {
+                ESP_LOGW(TAG, "Playback drain timeout: decode=%u playback=%u active=%d",
+                    static_cast<unsigned>(audio_decode_queue_.size()),
+                    static_cast<unsigned>(audio_playback_queue_.size()),
+                    audio_output_active_);
+                return;
+            }
+            continue;
+        }
+
+        if (!audio_queue_cv_.wait_until(lock, std::chrono::steady_clock::now() + kPlaybackStableDelay, [this]() {
+                return service_stopped_ || !audio_decode_queue_.empty() || !audio_playback_queue_.empty() || audio_output_active_;
+            })) {
+            return;
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            ESP_LOGW(TAG, "Playback stable wait timeout");
+            return;
+        }
+    }
 }
 
 void AudioService::ResetDecoder() {

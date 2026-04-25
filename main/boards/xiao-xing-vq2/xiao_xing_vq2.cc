@@ -56,6 +56,10 @@ private:
     static constexpr int kSwayAngleOffset = 20;
     static constexpr int kWebSearchTimeoutMs = 6000;
     static constexpr size_t kWebSearchMaxBodyBytes = 64 * 1024;
+    static constexpr int kLlmContextMaxResults = 2;
+    static constexpr size_t kLlmContextDescriptionMaxBytes = 360;
+    static constexpr size_t kLlmContextSummaryMaxBytes = 900;
+    static constexpr size_t kLlmContextSummaryLineMaxBytes = 280;
     static constexpr const char* kWebSearchSettingsNamespace = "web_search";
     static constexpr const char* kBraveApiKeySetting = "brave_api_key";
     static constexpr const char* kBraveLlmContextApiKeySetting = "llm_ctx_key";
@@ -113,6 +117,43 @@ private:
             return "";
         }
         return value->valuestring;
+    }
+
+    static size_t Utf8CharLength(unsigned char lead) {
+        if (lead < 0x80) {
+            return 1;
+        }
+        if ((lead & 0xE0) == 0xC0) {
+            return 2;
+        }
+        if ((lead & 0xF0) == 0xE0) {
+            return 3;
+        }
+        if ((lead & 0xF8) == 0xF0) {
+            return 4;
+        }
+        return 1;
+    }
+
+    static void TrimUtf8ToBytes(std::string& value, size_t max_bytes) {
+        if (value.size() <= max_bytes) {
+            return;
+        }
+
+        size_t pos = 0;
+        while (pos < value.size()) {
+            size_t len = Utf8CharLength(static_cast<unsigned char>(value[pos]));
+            if (pos + len > max_bytes) {
+                break;
+            }
+            pos += len;
+        }
+        value.resize(pos);
+    }
+
+    static std::string TrimmedUtf8(std::string value, size_t max_bytes) {
+        TrimUtf8ToBytes(value, max_bytes);
+        return value;
     }
 
     static cJSON* MakeWebSearchError(const std::string& code, const std::string& message) {
@@ -441,12 +482,12 @@ private:
             return error;
         }
 
-        max_results = std::clamp(max_results, 1, 3);
+        max_results = std::clamp(max_results, 1, kLlmContextMaxResults);
         std::string url = "https://api.search.brave.com/res/v1/llm/context?q=" + UrlEncode(query)
             + "&count=" + std::to_string(max_results)
             + "&maximum_number_of_urls=" + std::to_string(max_results)
-            + "&maximum_number_of_tokens=2048&maximum_number_of_snippets=6"
-            + "&maximum_number_of_tokens_per_url=1024&maximum_number_of_snippets_per_url=2"
+            + "&maximum_number_of_tokens=1024&maximum_number_of_snippets=4"
+            + "&maximum_number_of_tokens_per_url=512&maximum_number_of_snippets_per_url=2"
             + "&country=kr&search_lang=ko&context_threshold_mode=strict&enable_local=false";
 
         auto http = GetNetwork()->CreateHttp(3);
@@ -548,8 +589,8 @@ private:
                     description += " ";
                 }
                 description += snippet->valuestring;
-                if (description.size() >= 900) {
-                    description.resize(900);
+                if (description.size() >= kLlmContextDescriptionMaxBytes) {
+                    TrimUtf8ToBytes(description, kLlmContextDescriptionMaxBytes);
                     break;
                 }
             }
@@ -563,8 +604,12 @@ private:
             cJSON_AddStringToObject(result, "description", description.c_str());
             cJSON_AddItemToArray(result_array, result);
 
-            if (summary_hint.size() < 1400) {
-                summary_hint += title + ": " + description + "\n";
+            if (summary_hint.size() < kLlmContextSummaryMaxBytes) {
+                std::string line = title + ": " + TrimmedUtf8(description, kLlmContextSummaryLineMaxBytes) + "\n";
+                if (summary_hint.size() + line.size() > kLlmContextSummaryMaxBytes) {
+                    line = TrimmedUtf8(line, kLlmContextSummaryMaxBytes - summary_hint.size());
+                }
+                summary_hint += line;
             }
             added++;
         }
@@ -576,8 +621,14 @@ private:
         }
 
         cJSON_AddNumberToObject(root, "count", added);
+        cJSON_AddBoolToObject(root, "truncated", true);
         cJSON_AddStringToObject(root, "summary_hint", summary_hint.c_str());
         cJSON_AddItemToObject(root, "results", result_array);
+        char* debug_json = cJSON_PrintUnformatted(root);
+        if (debug_json != nullptr) {
+            ESP_LOGI(TAG, "Brave LLM context tool result: %u bytes", static_cast<unsigned>(strlen(debug_json)));
+            cJSON_free(debug_json);
+        }
         cJSON_Delete(response);
         return root;
     }

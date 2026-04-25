@@ -295,7 +295,28 @@ def process_extra_files(extra_files_dir, assets_dir):
     return extra_files_list
 
 
-def generate_index_json(assets_dir, srmodels, text_font, emoji_collection, extra_files=None, multinet_model_info=None):
+def process_sound_files(sound_files, assets_dir):
+    """Copy sound files into assets and return their asset names."""
+    if not sound_files:
+        return []
+
+    sound_names = []
+    seen = set()
+    for sound_file in sound_files:
+        sound_name = os.path.basename(sound_file)
+        if sound_name in seen:
+            continue
+        if copy_file(sound_file, os.path.join(assets_dir, sound_name)):
+            sound_names.append(sound_name)
+            seen.add(sound_name)
+
+    if sound_names:
+        print(f"Processed {len(sound_names)} sound files")
+
+    return sound_names
+
+
+def generate_index_json(assets_dir, srmodels, text_font, text_font_fallback, sounds, emoji_collection, extra_files=None, multinet_model_info=None):
     """Generate index.json file"""
     index_data = {
         "version": 1
@@ -306,6 +327,12 @@ def generate_index_json(assets_dir, srmodels, text_font, emoji_collection, extra
     
     if text_font:
         index_data["text_font"] = text_font
+
+    if text_font_fallback:
+        index_data["text_font_fallback"] = text_font_fallback
+
+    if sounds:
+        index_data["sounds"] = sounds
     
     if emoji_collection:
         index_data["emoji_collection"] = emoji_collection
@@ -756,7 +783,7 @@ def get_lv_font_conv_command(cache_dir):
     return [node, converter]
 
 
-def build_custom_text_font(ttf_path, output_dir, font_name, size, bpp, language_json_path, full_range=False):
+def build_custom_text_font(ttf_path, output_dir, font_name, size, bpp, language_json_path, full_range=False, ranges=None):
     """Build a cbin LVGL font from a TTF and locale-specific symbol subset."""
     if not ttf_path:
         return None
@@ -781,6 +808,10 @@ def build_custom_text_font(ttf_path, output_dir, font_name, size, bpp, language_
     if full_range:
         cmd += ['-r', '0x0-0xfffff']
         symbols_count = 'full range'
+    elif ranges:
+        range_text = ','.join(ranges)
+        cmd += ['-r', range_text]
+        symbols_count = range_text
     else:
         symbols = get_symbols_from_language_json(language_json_path)
         cmd += ['--symbols', symbols]
@@ -834,7 +865,7 @@ def get_emoji_collection_path(default_emoji_collection, xiaozhi_fonts_path, proj
     return None
 
 
-def build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path, extra_files_path, output_path, multinet_model_info=None):
+def build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, text_font_fallback_path, sound_files, emoji_collection_path, extra_files_path, output_path, multinet_model_info=None):
     """
     Build assets using integrated functions (no external dependencies)
     """
@@ -854,11 +885,13 @@ def build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font
         # Process each component
         srmodels = process_sr_models(wakenet_model_paths, multinet_model_paths, temp_build_dir, assets_dir) if (wakenet_model_paths or multinet_model_paths) else None
         text_font = process_text_font(text_font_path, assets_dir) if text_font_path else None
+        text_font_fallback = process_text_font(text_font_fallback_path, assets_dir) if text_font_fallback_path else None
+        sounds = process_sound_files(sound_files, assets_dir) if sound_files else []
         emoji_collection = process_emoji_collection(emoji_collection_path, assets_dir) if emoji_collection_path else None
         extra_files = process_extra_files(extra_files_path, assets_dir) if extra_files_path else None
         
         # Generate index.json
-        generate_index_json(assets_dir, srmodels, text_font, emoji_collection, extra_files, multinet_model_info)
+        generate_index_json(assets_dir, srmodels, text_font, text_font_fallback, sounds, emoji_collection, extra_files, multinet_model_info)
         
         # Generate config.json for packing
         config_path = generate_config_json(temp_build_dir, assets_dir)
@@ -904,12 +937,20 @@ def main():
     parser.add_argument('--esp_sr_model_path', help='Path to ESP-SR model directory')
     parser.add_argument('--xiaozhi_fonts_path', help='Path to xiaozhi-fonts component directory')
     parser.add_argument('--extra_files', help='Path to extra files directory to be included in assets')
+    parser.add_argument('--sound_file', action='append', default=[], help='Sound file to include in assets; can be passed multiple times')
     parser.add_argument('--custom_text_font_ttf', help='Path to a TTF font to subset and package as text font')
     parser.add_argument('--custom_text_font_name', default='custom_text_font.bin', help='Output filename for generated cbin text font')
     parser.add_argument('--custom_text_font_size', type=int, default=15, help='Pixel size for generated cbin text font')
     parser.add_argument('--custom_text_font_bpp', type=int, default=1, help='Bits per pixel for generated cbin text font')
     parser.add_argument('--custom_text_font_language_json', help='Language JSON used to collect custom font symbols')
     parser.add_argument('--custom_text_font_full_range', action='store_true', help='Include the full TTF glyph range instead of locale string subset')
+    parser.add_argument('--custom_text_font_fallback_ttf', help='Path to a fallback TTF font to subset and package as text font')
+    parser.add_argument('--custom_text_font_fallback_name', default='custom_text_font_fallback.bin', help='Output filename for generated cbin fallback text font')
+    parser.add_argument('--custom_text_font_fallback_size', type=int, default=15, help='Pixel size for generated cbin fallback text font')
+    parser.add_argument('--custom_text_font_fallback_bpp', type=int, default=1, help='Bits per pixel for generated cbin fallback text font')
+    parser.add_argument('--custom_text_font_fallback_language_json', help='Language JSON used to collect fallback font symbols')
+    parser.add_argument('--custom_text_font_fallback_full_range', action='store_true', help='Include the full fallback TTF glyph range instead of locale string subset')
+    parser.add_argument('--custom_text_font_fallback_range', action='append', default=[], help='Unicode range for generated cbin fallback text font; can be passed multiple times')
     
     args = parser.parse_args()
     
@@ -978,6 +1019,21 @@ def main():
             args.custom_text_font_bpp,
             args.custom_text_font_language_json,
             args.custom_text_font_full_range,
+            None,
+        )
+
+    text_font_fallback_path = None
+    if args.custom_text_font_fallback_ttf:
+        font_build_dir = os.path.join(os.path.dirname(args.output), "generated_fonts")
+        text_font_fallback_path = build_custom_text_font(
+            args.custom_text_font_fallback_ttf,
+            font_build_dir,
+            args.custom_text_font_fallback_name,
+            args.custom_text_font_fallback_size,
+            args.custom_text_font_fallback_bpp,
+            args.custom_text_font_fallback_language_json,
+            args.custom_text_font_fallback_full_range,
+            args.custom_text_font_fallback_range,
         )
     
     # Get emoji collection path if needed
@@ -1015,7 +1071,7 @@ def main():
         print(f"  wake word threshold: {custom_wake_word_config['threshold']}")
     
     # Check if we have anything to build
-    if not wakenet_model_paths and not multinet_model_paths and not text_font_path and not emoji_collection_path and not extra_files_path and not multinet_model_info:
+    if not wakenet_model_paths and not multinet_model_paths and not text_font_path and not text_font_fallback_path and not args.sound_file and not emoji_collection_path and not extra_files_path and not multinet_model_info:
         print("Warning: No assets to build (no SR models, text font, emoji collection, extra files, or custom wake word)")
         # Create an empty assets.bin file
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
@@ -1025,7 +1081,7 @@ def main():
         return
     
     # Build the assets
-    success = build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path, 
+    success = build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, text_font_fallback_path, args.sound_file, emoji_collection_path,
                                      extra_files_path, args.output, multinet_model_info)
     
     if not success:

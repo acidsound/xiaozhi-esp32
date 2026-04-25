@@ -440,6 +440,9 @@ void McpServer::ReplyResult(int id, const std::string& result) {
     payload += std::to_string(id) + ",\"result\":";
     payload += result;
     payload += "}";
+    if (payload.size() > 2000) {
+        ESP_LOGI(TAG, "reply result: id=%d payload=%u bytes", id, static_cast<unsigned>(payload.size()));
+    }
     Application::GetInstance().SendMcpMessage(payload);
 }
 
@@ -554,7 +557,12 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
         try {
-            ReplyResult(id, (*tool_iter)->Call(arguments));
+            std::string result = (*tool_iter)->Call(arguments);
+            if (result.size() > 1000) {
+                ESP_LOGI(TAG, "tools/call result: %s result=%u bytes",
+                    (*tool_iter)->name().c_str(), static_cast<unsigned>(result.size()));
+            }
+            ReplyResult(id, result);
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "tools/call: %s", e.what());
             ReplyError(id, e.what());

@@ -262,14 +262,18 @@ elseif(CONFIG_BOARD_TYPE_ESP_HI)
     set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_BINARY_DIR}/emoji")
 elseif(CONFIG_BOARD_TYPE_XIAO_XING_VQ2)
     set(BOARD_TYPE "xiao-xing-vq2")
-    set(BUILTIN_TEXT_FONT font_galmuri14_15_1)
+    set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
     set(BUILTIN_ICON_FONT font_awesome_14_1)
-    set(CUSTOM_BUILTIN_TEXT_FONT_TTF "${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-hi/fonts/Galmuri14.ttf")
-    set(CUSTOM_BUILTIN_TEXT_FONT_NAME "font_galmuri14_15_1")
-    set(CUSTOM_BUILTIN_TEXT_FONT_SIZE 15)
-    set(CUSTOM_BUILTIN_TEXT_FONT_BPP 1)
-    set(CUSTOM_BUILTIN_TEXT_FONT_RANGES
-        "0x20-0x7e,0x3130-0x318f,0xac00-0xd7a3,0x2000-0x206f,0x3000-0x303f,0xff00-0xffef")
+    set(CUSTOM_TEXT_FONT_TTF "${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-hi/fonts/Galmuri14.ttf")
+    set(CUSTOM_TEXT_FONT_NAME "font_galmuri14_15_1.bin")
+    set(CUSTOM_TEXT_FONT_SIZE 15)
+    set(CUSTOM_TEXT_FONT_BPP 1)
+    set(CUSTOM_TEXT_FONT_FULL_RANGE ON)
+    set(CUSTOM_TEXT_FONT_FALLBACK_NAME "font_puhui_common_cjk_14_1.bin")
+    set(CUSTOM_TEXT_FONT_FALLBACK_SIZE 14)
+    set(CUSTOM_TEXT_FONT_FALLBACK_BPP 1)
+    set(CUSTOM_TEXT_FONT_FALLBACK_RANGES "0x3400-0x4dbf,0x4e00-0x9fff")
+    set(USE_ASSET_SOUNDS ON)
 elseif(CONFIG_BOARD_TYPE_ESP_VOCAT)
     set(BOARD_TYPE "esp-vocat")
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
@@ -947,6 +951,12 @@ endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
 
+set(EMBED_SOUNDS ${LANG_SOUNDS} ${COMMON_SOUNDS})
+if(USE_ASSET_SOUNDS)
+    set(DEFAULT_ASSETS_SOUND_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS})
+    set(EMBED_SOUNDS "")
+endif()
+
 set(CUSTOM_BUILTIN_TEXT_FONT_OUTPUT "")
 if(CUSTOM_BUILTIN_TEXT_FONT_TTF)
     if(EXISTS "${CUSTOM_BUILTIN_TEXT_FONT_TTF}")
@@ -1017,7 +1027,7 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${EMBED_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
@@ -1052,13 +1062,21 @@ target_compile_definitions(${COMPONENT_LIB}
                     )
 
 # Add generation rules
+set(GEN_LANG_ARGS
+    --language "${LANG_DIR}"
+    --output "${LANG_HEADER}"
+)
+if(USE_ASSET_SOUNDS)
+    list(APPEND GEN_LANG_ARGS --asset-sounds)
+endif()
+
 add_custom_command(
     OUTPUT ${LANG_HEADER}
-    COMMAND python ${PROJECT_DIR}/scripts/gen_lang.py
-            --language "${LANG_DIR}"
-            --output "${LANG_HEADER}"
+    COMMAND python ${PROJECT_DIR}/scripts/gen_lang.py ${GEN_LANG_ARGS}
     DEPENDS
         ${LANG_JSON}
+        ${LANG_SOUNDS}
+        ${COMMON_SOUNDS}
         ${PROJECT_DIR}/scripts/gen_lang.py
     COMMENT "Generating ${LANG_DIR} language config"
 )
@@ -1067,6 +1085,7 @@ add_custom_command(
 add_custom_target(lang_header ALL
     DEPENDS ${LANG_HEADER}
 )
+add_dependencies(${COMPONENT_LIB} lang_header)
 
 # Find ESP-SR component dynamically
 find_component_by_pattern("espressif__esp-sr" ESP_SR_COMPONENT ESP_SR_COMPONENT_PATH)
@@ -1078,6 +1097,10 @@ endif()
 find_component_by_pattern("xiaozhi-fonts" XIAOZHI_FONTS_COMPONENT XIAOZHI_FONTS_COMPONENT_PATH)
 if(XIAOZHI_FONTS_COMPONENT_PATH)
     set(XIAOZHI_FONTS_PATH "${XIAOZHI_FONTS_COMPONENT_PATH}")
+endif()
+
+if(CONFIG_BOARD_TYPE_XIAO_XING_VQ2 AND XIAOZHI_FONTS_PATH)
+    set(CUSTOM_TEXT_FONT_FALLBACK_TTF "${XIAOZHI_FONTS_PATH}/ttf/puhui-common.ttf")
 endif()
 
 if(CONFIG_BOARD_TYPE_ESP_HI)
@@ -1149,6 +1172,13 @@ function(build_default_assets_bin)
         ${PROJECT_DIR}/scripts/build_default_assets.py
     )
 
+    if(DEFAULT_ASSETS_SOUND_FILES)
+        foreach(SOUND_FILE ${DEFAULT_ASSETS_SOUND_FILES})
+            list(APPEND BUILD_ARGS "--sound_file" "${SOUND_FILE}")
+        endforeach()
+        list(APPEND ASSETS_BUILD_DEPENDS ${DEFAULT_ASSETS_SOUND_FILES})
+    endif()
+
     if(CUSTOM_TEXT_FONT_TTF)
         if(EXISTS "${CUSTOM_TEXT_FONT_TTF}")
             list(APPEND BUILD_ARGS
@@ -1164,6 +1194,26 @@ function(build_default_assets_bin)
             list(APPEND ASSETS_BUILD_DEPENDS "${CUSTOM_TEXT_FONT_TTF}" "${LANG_JSON}")
         else()
             message(WARNING "Custom text font not found: ${CUSTOM_TEXT_FONT_TTF}")
+        endif()
+    endif()
+
+    if(CUSTOM_TEXT_FONT_FALLBACK_TTF)
+        if(EXISTS "${CUSTOM_TEXT_FONT_FALLBACK_TTF}")
+            list(APPEND BUILD_ARGS
+                "--custom_text_font_fallback_ttf" "${CUSTOM_TEXT_FONT_FALLBACK_TTF}"
+                "--custom_text_font_fallback_name" "${CUSTOM_TEXT_FONT_FALLBACK_NAME}"
+                "--custom_text_font_fallback_size" "${CUSTOM_TEXT_FONT_FALLBACK_SIZE}"
+                "--custom_text_font_fallback_bpp" "${CUSTOM_TEXT_FONT_FALLBACK_BPP}"
+                "--custom_text_font_fallback_language_json" "${LANG_JSON}"
+            )
+            if(CUSTOM_TEXT_FONT_FALLBACK_FULL_RANGE)
+                list(APPEND BUILD_ARGS "--custom_text_font_fallback_full_range")
+            elseif(CUSTOM_TEXT_FONT_FALLBACK_RANGES)
+                list(APPEND BUILD_ARGS "--custom_text_font_fallback_range" "${CUSTOM_TEXT_FONT_FALLBACK_RANGES}")
+            endif()
+            list(APPEND ASSETS_BUILD_DEPENDS "${CUSTOM_TEXT_FONT_FALLBACK_TTF}" "${LANG_JSON}")
+        else()
+            message(WARNING "Custom text font fallback not found: ${CUSTOM_TEXT_FONT_FALLBACK_TTF}")
         endif()
     endif()
 

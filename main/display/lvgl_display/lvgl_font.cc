@@ -11,3 +11,10 @@ LvglCBinFont::~LvglCBinFont() {
         cbin_font_delete(font_);
     }
 }
+
+void LvglCBinFont::SetFallback(std::shared_ptr<LvglFont> fallback) {
+    fallback_ = fallback;
+    if (font_ != nullptr) {
+        font_->fallback = fallback_ ? fallback_->font() : nullptr;
+    }
+}

@@ -65,6 +65,7 @@ void Application::Initialize() {
     // Setup the display
     auto display = board.GetDisplay();
     display->SetupUI();
+    display->SetBootAnimationEnabled(true);
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
@@ -348,6 +349,7 @@ void Application::CheckAssetsVersion() {
 
     if (!assets.partition_valid()) {
         ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
+        display->SetBootAnimationEnabled(false);
         return;
     }
     
@@ -383,12 +385,14 @@ void Application::CheckAssetsVersion() {
             Alert(Lang::Strings::ERROR, Lang::Strings::DOWNLOAD_ASSETS_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
             vTaskDelay(pdMS_TO_TICKS(2000));
             SetDeviceState(kDeviceStateActivating);
+            display->SetBootAnimationEnabled(false);
             return;
         }
     }
 
     // Apply assets
     assets.Apply();
+    display->SetBootAnimationEnabled(false);
     display->SetChatMessage("system", "");
     display->SetEmotion("microchip_ai");
 }
@@ -523,6 +527,9 @@ void Application::InitializeProtocol() {
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
+            if (GetDeviceState() == kDeviceStateSpeaking) {
+                audio_service_.WaitForPlaybackQueueEmpty();
+            }
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
@@ -542,6 +549,7 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
+                        audio_service_.WaitForPlaybackQueueEmpty();
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {

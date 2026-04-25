@@ -96,6 +96,15 @@ void OledDisplay::SetupUI() {
 }
 
 OledDisplay::~OledDisplay() {
+    if (boot_animation_timer_ != nullptr) {
+        lv_timer_del(boot_animation_timer_);
+        boot_animation_timer_ = nullptr;
+    }
+    if (boot_animation_layer_ != nullptr) {
+        lv_obj_del(boot_animation_layer_);
+        boot_animation_layer_ = nullptr;
+    }
+
     if (content_ != nullptr) {
         lv_obj_del(content_);
     }
@@ -141,6 +150,76 @@ bool OledDisplay::Lock(int timeout_ms) {
 
 void OledDisplay::Unlock() {
     lvgl_port_unlock();
+}
+
+void OledDisplay::UpdateBootAnimation() {
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2
+    if (boot_animation_layer_ == nullptr) {
+        return;
+    }
+
+    static const int offsets[] = {-14, 0, 14};
+    for (int i = 0; i < 3; ++i) {
+        auto bubble = boot_animation_bubbles_[i];
+        if (bubble == nullptr) {
+            continue;
+        }
+        int size = (i == boot_animation_phase_) ? 8 : 5;
+        lv_obj_set_size(bubble, size, size);
+        lv_obj_align(bubble, LV_ALIGN_CENTER, offsets[i], 0);
+    }
+    boot_animation_phase_ = (boot_animation_phase_ + 1) % 3;
+#endif
+}
+
+void OledDisplay::SetBootAnimationEnabled(bool enabled) {
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2
+    DisplayLockGuard lock(this);
+    if (enabled) {
+        if (boot_animation_layer_ != nullptr) {
+            return;
+        }
+
+        boot_animation_layer_ = lv_obj_create(lv_screen_active());
+        lv_obj_set_size(boot_animation_layer_, LV_HOR_RES, LV_VER_RES);
+        lv_obj_set_style_radius(boot_animation_layer_, 0, 0);
+        lv_obj_set_style_bg_color(boot_animation_layer_, lv_color_white(), 0);
+        lv_obj_set_style_border_width(boot_animation_layer_, 0, 0);
+        lv_obj_set_style_pad_all(boot_animation_layer_, 0, 0);
+        lv_obj_set_scrollbar_mode(boot_animation_layer_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_center(boot_animation_layer_);
+
+        for (int i = 0; i < 3; ++i) {
+            boot_animation_bubbles_[i] = lv_obj_create(boot_animation_layer_);
+            lv_obj_set_style_radius(boot_animation_bubbles_[i], LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(boot_animation_bubbles_[i], lv_color_black(), 0);
+            lv_obj_set_style_border_width(boot_animation_bubbles_[i], 0, 0);
+            lv_obj_set_scrollbar_mode(boot_animation_bubbles_[i], LV_SCROLLBAR_MODE_OFF);
+        }
+
+        boot_animation_phase_ = 0;
+        UpdateBootAnimation();
+        boot_animation_timer_ = lv_timer_create([](lv_timer_t* timer) {
+            auto display = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
+            display->UpdateBootAnimation();
+        }, 180, this);
+        return;
+    }
+
+    if (boot_animation_timer_ != nullptr) {
+        lv_timer_del(boot_animation_timer_);
+        boot_animation_timer_ = nullptr;
+    }
+    if (boot_animation_layer_ != nullptr) {
+        lv_obj_del(boot_animation_layer_);
+        boot_animation_layer_ = nullptr;
+    }
+    for (auto& bubble : boot_animation_bubbles_) {
+        bubble = nullptr;
+    }
+#else
+    (void)enabled;
+#endif
 }
 
 void OledDisplay::SetChatMessage(const char* role, const char* content) {
