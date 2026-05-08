@@ -23,6 +23,7 @@ SPDX-License-Identifier: Apache-2.0
     <div class="tab" data-tab="custom">自定义动作</div>
     <div class="tab active" data-tab="control">控制</div>
     <div class="tab" data-tab="config">舵机校准</div>
+    <div class="tab" data-tab="settings">设置</div>
   </div>
   <div class="content">
     <div id="control" class="panel">
@@ -117,6 +118,30 @@ SPDX-License-Identifier: Apache-2.0
             <button id="play-sequence" class="custom-button">执行动作</button>
           </div>
           <div class="error" id="custom-error"></div>
+        </div>
+      </div>
+    </div>
+    <div id="settings" class="panel" style="display:none;">
+      <div class="settings-area">
+        <h2>Web Search</h2>
+        <div class="settings-card">
+          <div class="setting-status">Web Search Key：<span id="brave-web-key-status">检查中...</span></div>
+          <label for="brave-web-api-key">Web Search API Key</label>
+          <input type="password" id="brave-web-api-key" autocomplete="off" placeholder="粘贴 Brave Web Search API Key">
+          <div class="setting-status">LLM Context Key：<span id="brave-llm-context-key-status">检查中...</span></div>
+          <label for="brave-llm-context-api-key">LLM Context API Key</label>
+          <input type="password" id="brave-llm-context-api-key" autocomplete="off" placeholder="粘贴 Brave LLM Context API Key">
+          <label class="setting-checkbox" for="brave-use-llm-context">
+            <input type="checkbox" id="brave-use-llm-context">
+            <span>允许 LLM Context 用于深度检索和额度回退</span>
+          </label>
+          <div class="settings-buttons">
+            <button id="save-brave-settings" class="settings-button">保存</button>
+            <button id="clear-brave-web-key" class="settings-button secondary">清除 Web Key</button>
+            <button id="clear-brave-llm-context-key" class="settings-button secondary">清除 LLM Key</button>
+          </div>
+          <div class="settings-note">Key 只会保存在设备 NVS 中，保存后不会再次显示。普通搜索使用 Web Search；启用后，深度检索请求可使用 LLM Context。</div>
+          <div class="error" id="settings-error"></div>
         </div>
       </div>
     </div>

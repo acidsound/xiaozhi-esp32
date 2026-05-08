@@ -409,3 +409,89 @@ html, body {
 .action-selector button:hover {
   background: #ccc;
 }
+
+/* 设置面板样式 */
+.settings-area {
+  padding: 20px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fff;
+}
+
+.settings-card label {
+  color: #666;
+}
+
+.settings-card input {
+  padding: 10px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.setting-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #333;
+  font-size: 14px;
+}
+
+.setting-checkbox input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+}
+
+.settings-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.settings-button {
+  padding: 8px 20px;
+  background: #ddd;
+  color: #333;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.settings-button:hover {
+  background: #ccc;
+}
+
+.settings-button.secondary {
+  background: #eee;
+}
+
+.setting-status {
+  font-size: 14px;
+}
+
+.configured {
+  color: #198754;
+  font-weight: bold;
+}
+
+.not-configured {
+  color: #dc3545;
+  font-weight: bold;
+}
+
+.settings-note {
+  color: #666;
+  font-size: 13px;
+}

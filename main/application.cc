@@ -317,6 +317,8 @@ void Application::HandleActivationDoneEvent() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     });
+
+    PreconnectAudioChannelIfNeeded();
 }
 
 void Application::ActivationTask() {
@@ -479,9 +481,9 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2 || CONFIG_BOARD_TYPE_ESP_HI
     if (ota_->HasWebsocketConfig()) {
-        ESP_LOGI(TAG, "Using WebSocket protocol for Xiao Xing VQ2");
+        ESP_LOGI(TAG, "Using WebSocket protocol for board audio");
         protocol_ = std::make_unique<WebsocketProtocol>();
     } else if (ota_->HasMqttConfig()) {
         ESP_LOGW(TAG, "WebSocket config not found, falling back to MQTT");
@@ -506,6 +508,10 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnNetworkError([this](const std::string& message) {
+        if (audio_channel_preconnecting_.load()) {
+            ESP_LOGW(TAG, "Audio channel preconnect failed: %s", message.c_str());
+            return;
+        }
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
@@ -748,7 +754,7 @@ void Application::HandleToggleChatEvent() {
     if (state == kDeviceStateIdle) {
         BeginAudioInteraction();
         ListeningMode mode = GetDefaultListeningMode();
-        if (!protocol_->IsAudioChannelOpened()) {
+        if (audio_channel_preconnecting_.load() || !protocol_->IsAudioChannelOpened()) {
             play_popup_on_connecting_ = true;
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
@@ -768,6 +774,10 @@ void Application::HandleToggleChatEvent() {
 void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
+        return;
+    }
+
+    if (!protocol_->IsAudioChannelOpened() && !WaitForAudioChannelPreconnect()) {
         return;
     }
 
@@ -799,7 +809,7 @@ void Application::HandleStartListeningEvent() {
     
     if (state == kDeviceStateIdle) {
         BeginAudioInteraction();
-        if (!protocol_->IsAudioChannelOpened()) {
+        if (audio_channel_preconnecting_.load() || !protocol_->IsAudioChannelOpened()) {
             play_popup_on_connecting_ = true;
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
@@ -844,7 +854,7 @@ void Application::HandleWakeWordDetectedEvent() {
         audio_service_.EncodeWakeWord();
         auto wake_word = audio_service_.GetLastWakeWord();
 
-        if (!protocol_->IsAudioChannelOpened()) {
+        if (audio_channel_preconnecting_.load() || !protocol_->IsAudioChannelOpened()) {
             play_popup_on_connecting_ = true;
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update),
@@ -883,6 +893,11 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     auto state = GetDeviceState();
     if (state != kDeviceStateConnecting &&
             !(state == kDeviceStateIdle && protocol_->IsAudioChannelOpened())) {
+        return;
+    }
+
+    if (!protocol_->IsAudioChannelOpened() && !WaitForAudioChannelPreconnect()) {
+        audio_service_.EnableWakeWordDetection(true);
         return;
     }
 
@@ -1089,7 +1104,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         BeginAudioInteraction();
         audio_service_.EncodeWakeWord();
 
-        if (!protocol_->IsAudioChannelOpened()) {
+        if (audio_channel_preconnecting_.load() || !protocol_->IsAudioChannelOpened()) {
             play_popup_on_connecting_ = true;
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
@@ -1183,6 +1198,69 @@ void Application::ClearAssistantOutputSuppression(const char* reason) {
 void Application::BeginAudioInteraction() {
     ClearAssistantOutputSuppression("audio interaction starting");
     Board::GetInstance().OnAudioInteractionStarting();
+}
+
+void Application::PreconnectAudioChannelIfNeeded() {
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2 || CONFIG_BOARD_TYPE_ESP_HI
+    if (!protocol_ || GetDeviceState() != kDeviceStateIdle || protocol_->IsAudioChannelOpened()) {
+        return;
+    }
+
+    bool expected = false;
+    if (!audio_channel_preconnecting_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    BaseType_t result = xTaskCreate([](void* arg) {
+        auto app = static_cast<Application*>(arg);
+        app->PreconnectAudioChannelTask();
+        vTaskDelete(nullptr);
+    }, "ws_preconnect", 4096 * 2, this, 2, &audio_channel_preconnect_task_handle_);
+
+    if (result != pdPASS) {
+        audio_channel_preconnecting_ = false;
+        audio_channel_preconnect_task_handle_ = nullptr;
+        ESP_LOGW(TAG, "Failed to create audio channel preconnect task");
+    }
+#endif
+}
+
+void Application::PreconnectAudioChannelTask() {
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2 || CONFIG_BOARD_TYPE_ESP_HI
+    bool success = false;
+    if (protocol_ && GetDeviceState() == kDeviceStateIdle && !protocol_->IsAudioChannelOpened()) {
+        ESP_LOGI(TAG, "Preconnecting WebSocket audio channel");
+        success = protocol_->OpenAudioChannel();
+    }
+
+    if (success) {
+        ESP_LOGI(TAG, "WebSocket audio channel preconnected");
+    } else if (protocol_ && GetDeviceState() == kDeviceStateIdle && !protocol_->IsAudioChannelOpened()) {
+        ESP_LOGW(TAG, "WebSocket audio channel preconnect did not complete");
+    }
+
+    audio_channel_preconnecting_ = false;
+    audio_channel_preconnect_task_handle_ = nullptr;
+#endif
+}
+
+bool Application::WaitForAudioChannelPreconnect(int timeout_ms) {
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2 || CONFIG_BOARD_TYPE_ESP_HI
+    const int delay_ms = 50;
+    int elapsed_ms = 0;
+    while (audio_channel_preconnecting_.load() && elapsed_ms < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        elapsed_ms += delay_ms;
+    }
+
+    if (audio_channel_preconnecting_.load()) {
+        ESP_LOGW(TAG, "Timed out waiting for audio channel preconnect");
+        return false;
+    }
+#else
+    (void)timeout_ms;
+#endif
+    return true;
 }
 
 void Application::ResetProtocol() {

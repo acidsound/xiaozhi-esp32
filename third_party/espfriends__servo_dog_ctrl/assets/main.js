@@ -360,6 +360,113 @@ class CustomActionPanel {
   }
 }
 
+class SettingsPanel {
+  constructor() {
+    this.webKeyStatus = document.getElementById('brave-web-key-status');
+    this.llmContextKeyStatus = document.getElementById('brave-llm-context-key-status');
+    this.webApiKeyInput = document.getElementById('brave-web-api-key');
+    this.llmContextApiKeyInput = document.getElementById('brave-llm-context-api-key');
+    this.useLlmContextInput = document.getElementById('brave-use-llm-context');
+    this.saveButton = document.getElementById('save-brave-settings');
+    this.clearWebButton = document.getElementById('clear-brave-web-key');
+    this.clearLlmContextButton = document.getElementById('clear-brave-llm-context-key');
+    this.error = document.getElementById('settings-error');
+
+    this.saveButton.onclick = () => this.saveBraveSettings();
+    this.clearWebButton.onclick = () => this.clearWebKey();
+    this.clearLlmContextButton.onclick = () => this.clearLlmContextKey();
+    this.useLlmContextInput.onchange = () => this.saveLlmContextSetting();
+    this.loadBraveKeyStatus();
+  }
+
+  async loadBraveKeyStatus() {
+    try {
+      const data = await sendRequest('/brave_search_config');
+      this.updateStatuses(data);
+      this.useLlmContextInput.checked = Boolean(data.use_llm_context);
+      this.error.textContent = '';
+    } catch (error) {
+      this.webKeyStatus.textContent = '未知';
+      this.llmContextKeyStatus.textContent = '未知';
+      this.error.textContent = error.message;
+    }
+  }
+
+  updateKeyStatus(element, configured) {
+    element.textContent = configured ? '已配置' : '未配置';
+    element.className = configured ? 'configured' : 'not-configured';
+  }
+
+  updateStatuses(data) {
+    const webConfigured = data.web_configured !== undefined ? data.web_configured : data.configured;
+    this.updateKeyStatus(this.webKeyStatus, Boolean(webConfigured));
+    this.updateKeyStatus(this.llmContextKeyStatus, Boolean(data.llm_context_configured));
+  }
+
+  async saveBraveSettings() {
+    const webApiKey = this.webApiKeyInput.value.trim();
+    const llmContextApiKey = this.llmContextApiKeyInput.value.trim();
+    const payload = {
+      use_llm_context: this.useLlmContextInput.checked
+    };
+    if (webApiKey) {
+      payload.web_api_key = webApiKey;
+    }
+    if (llmContextApiKey) {
+      payload.llm_context_api_key = llmContextApiKey;
+    }
+
+    try {
+      const data = await sendRequest('/brave_search_config', payload);
+      this.webApiKeyInput.value = '';
+      this.llmContextApiKeyInput.value = '';
+      this.updateStatuses(data);
+      this.useLlmContextInput.checked = Boolean(data.use_llm_context);
+      this.error.textContent = '已保存';
+    } catch (error) {
+      this.error.textContent = error.message;
+    }
+  }
+
+  async clearWebKey() {
+    try {
+      const data = await sendRequest('/brave_search_config', { web_api_key: '' });
+      this.webApiKeyInput.value = '';
+      this.updateStatuses(data);
+      this.useLlmContextInput.checked = Boolean(data.use_llm_context);
+      this.error.textContent = 'Web Key 已清除';
+    } catch (error) {
+      this.error.textContent = error.message;
+    }
+  }
+
+  async clearLlmContextKey() {
+    try {
+      const data = await sendRequest('/brave_search_config', { llm_context_api_key: '' });
+      this.llmContextApiKeyInput.value = '';
+      this.updateStatuses(data);
+      this.useLlmContextInput.checked = Boolean(data.use_llm_context);
+      this.error.textContent = 'LLM Context Key 已清除';
+    } catch (error) {
+      this.error.textContent = error.message;
+    }
+  }
+
+  async saveLlmContextSetting() {
+    try {
+      const data = await sendRequest('/brave_search_config', {
+        use_llm_context: this.useLlmContextInput.checked
+      });
+      this.updateStatuses(data);
+      this.useLlmContextInput.checked = Boolean(data.use_llm_context);
+      this.error.textContent = this.useLlmContextInput.checked ? 'LLM Context 已启用' : 'LLM Context 已禁用';
+    } catch (error) {
+      this.useLlmContextInput.checked = !this.useLlmContextInput.checked;
+      this.error.textContent = error.message;
+    }
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // disable double click zoom
   document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
@@ -376,4 +483,5 @@ document.addEventListener('DOMContentLoaded', () => {
   new ControlPanel();
   new CalibrationPanel();
   new CustomActionPanel();
+  new SettingsPanel();
 });

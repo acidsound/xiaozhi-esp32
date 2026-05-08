@@ -18,6 +18,7 @@
 
 #include "assets/lang_config.h"
 #include "anim_player.h"
+#include "brave_search.h"
 #include "emoji_display.h"
 #include "servo_dog_ctrl.h"
 #include "led_strip.h"
@@ -224,7 +225,10 @@ private:
         SetLedColor(0x00, 0x00, 0x00);
 
 #ifdef CONFIG_ESP_HI_WEB_CONTROL_ENABLED
-        esp_event_loop_create_default();
+        esp_err_t err = esp_event_loop_create_default();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_ERROR_CHECK(err);
+        }
         ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED,
                                                  &wifi_event_handler, this));
 #endif //CONFIG_ESP_HI_WEB_CONTROL_ENABLED
@@ -302,6 +306,35 @@ private:
     void InitializeTools()
     {
         auto& mcp_server = McpServer::GetInstance();
+
+        mcp_server.AddTool("self.network.get_wifi_info",
+            "현재 Wi-Fi 네트워크 정보를 확인합니다. 사용자가 IP 주소, 웹 조작 주소, 같은 네트워크에서 접속할 주소, SSID, 신호 세기를 물어보면 이 도구를 사용하세요.",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                return cJSON_Parse(GetBoardJson().c_str());
+            });
+
+        mcp_server.AddTool("self.web.search",
+            "Brave Search API로 최신 웹 정보를 검색하거나 조사합니다. 사용자가 '검색해줘', '알아봐줘', '찾아봐줘', '최근', '오늘', '요즘'처럼 빠른 최신 정보나 뉴스 확인을 요청하면 mode='web'을 사용하세요. 사용자가 '조사해줘', '자세히 알아봐줘', '근거까지', '출처 내용을 보고', '본문 기준으로', '비교해서', '분석해줘', '왜 그런지'처럼 깊이 있는 확인을 요청하면 mode='context'를 사용하세요. mode='context' 결과가 ok=true이면 단순히 검색했다고 하지 말고 '조사해봤다', '출처 내용을 살펴봤다'처럼 말하고, 근거를 자연스럽게 요약하세요. 결과를 그대로 읽지 말고 핵심만 한국어로 요약하고, 중요한 출처 1-3개를 함께 말하세요. quota_warning=true이면 답변 끝에 quota_warning_message를 짧게 덧붙이세요. ok=false 응답이면 기다리거나 재시도하지 말고 실패 이유와 필요한 조치를 짧게 안내한 뒤, 일반 지식으로 답할 수 있는 범위만 답하세요.",
+            PropertyList({
+                Property("query", kPropertyTypeString),
+                Property("max_results", kPropertyTypeInteger, 3, 1, 3),
+                Property("mode", kPropertyTypeString, "auto"),
+            }), [](const PropertyList& properties) -> ReturnValue {
+                std::string query = properties["query"].value<std::string>();
+                int max_results = properties["max_results"].value<int>();
+                std::string mode = properties["mode"].value<std::string>();
+                return brave_search::Search(query, max_results, mode);
+            });
+
+        mcp_server.AddTool("self.web.search.get_config_status",
+            "Brave Search 설정 상태를 확인합니다. 실제 API 키 문자열은 이 도구의 반환값에 존재하지 않고 configured 여부만 반환됩니다.",
+            PropertyList(),
+            [](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                return brave_search::GetConfigStatus();
+            });
         
         // 基础动作控制
         mcp_server.AddTool("self.dog.basic_control", "机器人的基础动作。机器人可以做以下基础动作：\n"

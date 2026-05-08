@@ -144,8 +144,10 @@ private:
     bool play_popup_on_connecting_ = false;
     bool play_popup_on_listening_ = false;  // Fallback for paths that enter listening without a connecting state
     std::atomic<bool> suppress_assistant_output_until_user_input_{false};
+    std::atomic<bool> audio_channel_preconnecting_{false};
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+    TaskHandle_t audio_channel_preconnect_task_handle_ = nullptr;
 
 
     // Event handlers
@@ -161,6 +163,9 @@ private:
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void BeginAudioInteraction();
     void ClearAssistantOutputSuppression(const char* reason);
+    void PreconnectAudioChannelIfNeeded();
+    void PreconnectAudioChannelTask();
+    bool WaitForAudioChannelPreconnect(int timeout_ms = 12000);
 
     // Activation task (runs in background)
     void ActivationTask();

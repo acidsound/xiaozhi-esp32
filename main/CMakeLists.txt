@@ -64,6 +64,10 @@ list(APPEND SOURCES
 )
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
 
+if(CONFIG_BOARD_TYPE_ESP_HI)
+    list(APPEND SOURCES "boards/common/brave_search.cc")
+endif()
+
 
 idf_build_get_property(build_components BUILD_COMPONENTS)
 # Function to find component dynamically by pattern
@@ -254,11 +258,6 @@ elseif(CONFIG_BOARD_TYPE_ESP_SPOT_C5)
     set(BOARD_TYPE "esp-spot")
 elseif(CONFIG_BOARD_TYPE_ESP_HI)
     set(BOARD_TYPE "esp-hi")
-    set(CUSTOM_TEXT_FONT_TTF "${CMAKE_CURRENT_SOURCE_DIR}/boards/esp-hi/fonts/Galmuri14.ttf")
-    set(CUSTOM_TEXT_FONT_NAME "font_galmuri14_15_1.bin")
-    set(CUSTOM_TEXT_FONT_SIZE 15)
-    set(CUSTOM_TEXT_FONT_BPP 1)
-    set(CUSTOM_TEXT_FONT_FULL_RANGE ON)
     # Set ESP_HI emoji directory for DEFAULT_ASSETS_EXTRA_FILES
     set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_BINARY_DIR}/emoji")
 elseif(CONFIG_BOARD_TYPE_XIAO_XING_VQ2)
