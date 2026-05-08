@@ -9,6 +9,8 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <cstdio>
+#include <string_view>
 #include <mbedtls/base64.h>
 
 #include <cJSON.h>
@@ -54,6 +56,45 @@ enum PropertyType {
     kPropertyTypeInteger,
     kPropertyTypeString
 };
+
+inline void McpAppendJsonString(std::string& out, std::string_view value) {
+    out.push_back('"');
+    for (unsigned char c : value) {
+        switch (c) {
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\b':
+                out += "\\b";
+                break;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                if (c < 0x20) {
+                    char escaped[7];
+                    std::snprintf(escaped, sizeof(escaped), "\\u%04x", static_cast<unsigned>(c));
+                    out += escaped;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+                break;
+        }
+    }
+    out.push_back('"');
+}
 
 class Property {
 private:
@@ -121,36 +162,35 @@ public:
     }
 
     std::string to_json() const {
-        cJSON *json = cJSON_CreateObject();
-        
+        std::string result = "{\"type\":\"";
         if (type_ == kPropertyTypeBoolean) {
-            cJSON_AddStringToObject(json, "type", "boolean");
+            result += "boolean\"";
             if (has_default_value_) {
-                cJSON_AddBoolToObject(json, "default", value<bool>());
+                result += ",\"default\":";
+                result += value<bool>() ? "true" : "false";
             }
         } else if (type_ == kPropertyTypeInteger) {
-            cJSON_AddStringToObject(json, "type", "integer");
+            result += "integer\"";
             if (has_default_value_) {
-                cJSON_AddNumberToObject(json, "default", value<int>());
+                result += ",\"default\":";
+                result += std::to_string(value<int>());
             }
             if (min_value_.has_value()) {
-                cJSON_AddNumberToObject(json, "minimum", min_value_.value());
+                result += ",\"minimum\":";
+                result += std::to_string(min_value_.value());
             }
             if (max_value_.has_value()) {
-                cJSON_AddNumberToObject(json, "maximum", max_value_.value());
+                result += ",\"maximum\":";
+                result += std::to_string(max_value_.value());
             }
         } else if (type_ == kPropertyTypeString) {
-            cJSON_AddStringToObject(json, "type", "string");
+            result += "string\"";
             if (has_default_value_) {
-                cJSON_AddStringToObject(json, "default", value<std::string>().c_str());
+                result += ",\"default\":";
+                McpAppendJsonString(result, value<std::string>());
             }
         }
-        
-        char *json_str = cJSON_PrintUnformatted(json);
-        std::string result(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(json);
-        
+        result += "}";
         return result;
     }
 };
@@ -189,18 +229,18 @@ public:
     }
 
     std::string to_json() const {
-        cJSON *json = cJSON_CreateObject();
-        
+        std::string result = "{";
+        bool first = true;
         for (const auto& property : properties_) {
-            cJSON *prop_json = cJSON_Parse(property.to_json().c_str());
-            cJSON_AddItemToObject(json, property.name().c_str(), prop_json);
+            if (!first) {
+                result += ",";
+            }
+            first = false;
+            McpAppendJsonString(result, property.name());
+            result += ":";
+            result += property.to_json();
         }
-        
-        char *json_str = cJSON_PrintUnformatted(json);
-        std::string result(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(json);
-        
+        result += "}";
         return result;
     }
 };
@@ -231,46 +271,60 @@ public:
 
     std::string to_json() const {
         std::vector<std::string> required = properties_.GetRequired();
-        
-        cJSON *json = cJSON_CreateObject();
-        cJSON_AddStringToObject(json, "name", name_.c_str());
-        cJSON_AddStringToObject(json, "description", description_.c_str());
-        
-        cJSON *input_schema = cJSON_CreateObject();
-        cJSON_AddStringToObject(input_schema, "type", "object");
-        
-        cJSON *properties = cJSON_Parse(properties_.to_json().c_str());
-        cJSON_AddItemToObject(input_schema, "properties", properties);
-        
+
+        std::string properties_json = properties_.to_json();
+        std::string result;
+        result.reserve(name_.size() + description_.size() + properties_json.size() + 160);
+        result += "{\"name\":";
+        McpAppendJsonString(result, name_);
+        result += ",\"description\":";
+        McpAppendJsonString(result, description_);
+        result += ",\"inputSchema\":{\"type\":\"object\",\"properties\":";
+        result += properties_json;
+
         if (!required.empty()) {
-            cJSON *required_array = cJSON_CreateArray();
+            result += ",\"required\":[";
+            bool first = true;
             for (const auto& property : required) {
-                cJSON_AddItemToArray(required_array, cJSON_CreateString(property.c_str()));
+                if (!first) {
+                    result += ",";
+                }
+                first = false;
+                McpAppendJsonString(result, property);
             }
-            cJSON_AddItemToObject(input_schema, "required", required_array);
+            result += "]";
         }
-        
-        cJSON_AddItemToObject(json, "inputSchema", input_schema);
+        result += "}";
 
         // Add audience annotation if the tool is user only (invisible to AI)
         if (user_only_) {
-            cJSON *annotations = cJSON_CreateObject();
-            cJSON *audience = cJSON_CreateArray();
-            cJSON_AddItemToArray(audience, cJSON_CreateString("user"));
-            cJSON_AddItemToObject(annotations, "audience", audience);
-            cJSON_AddItemToObject(json, "annotations", annotations);
+            result += ",\"annotations\":{\"audience\":[\"user\"]}";
         }
-        
-        char *json_str = cJSON_PrintUnformatted(json);
-        std::string result(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(json);
-        
+        result += "}";
         return result;
     }
 
     std::string Call(const PropertyList& properties) {
         ReturnValue return_value = callback_(properties);
+        if (std::holds_alternative<std::string>(return_value)) {
+            const auto& value = std::get<std::string>(return_value);
+            std::string result;
+            result.reserve(value.size() + 64);
+            result += "{\"content\":[{\"type\":\"text\",\"text\":";
+            McpAppendJsonString(result, value);
+            result += "}],\"isError\":false}";
+            return result;
+        }
+        if (std::holds_alternative<bool>(return_value)) {
+            return std::get<bool>(return_value)
+                ? "{\"content\":[{\"type\":\"text\",\"text\":\"true\"}],\"isError\":false}"
+                : "{\"content\":[{\"type\":\"text\",\"text\":\"false\"}],\"isError\":false}";
+        }
+        if (std::holds_alternative<int>(return_value)) {
+            return "{\"content\":[{\"type\":\"text\",\"text\":\""
+                + std::to_string(std::get<int>(return_value)) + "\"}],\"isError\":false}";
+        }
+
         // 返回结果
         cJSON* result = cJSON_CreateObject();
         cJSON* content = cJSON_CreateArray();
@@ -285,13 +339,7 @@ public:
         } else {
             cJSON* text = cJSON_CreateObject();
             cJSON_AddStringToObject(text, "type", "text");
-            if (std::holds_alternative<std::string>(return_value)) {
-                cJSON_AddStringToObject(text, "text", std::get<std::string>(return_value).c_str());
-            } else if (std::holds_alternative<bool>(return_value)) {
-                cJSON_AddStringToObject(text, "text", std::get<bool>(return_value) ? "true" : "false");
-            } else if (std::holds_alternative<int>(return_value)) {
-                cJSON_AddStringToObject(text, "text", std::to_string(std::get<int>(return_value)).c_str());
-            } else if (std::holds_alternative<cJSON*>(return_value)) {
+            if (std::holds_alternative<cJSON*>(return_value)) {
                 cJSON* json = std::get<cJSON*>(return_value);
                 char* json_str = cJSON_PrintUnformatted(json);
                 cJSON_AddStringToObject(text, "text", json_str);

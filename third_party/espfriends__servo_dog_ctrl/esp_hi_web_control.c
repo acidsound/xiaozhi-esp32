@@ -6,13 +6,17 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "esp_err.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_hi_web_control.h"
 #include "servo_control_setting.h"
 #include "servo_dog_ctrl.h"
+#include "sdkconfig.h"
+#if !CONFIG_IDF_TARGET_ESP32C3
 #include "mdns.h"
+#endif
 
 #define TAG "HTTP_SERVER"
 #define WEB_SEARCH_NVS_NAMESPACE "web_search"
@@ -21,6 +25,7 @@
 #define BRAVE_USE_LLM_CONTEXT_NVS_KEY "use_llm_ctx"
 
 static bool is_calibration_mode = false;
+static httpd_handle_t server_handle = NULL;
 
 #define IS_FILE_EXT(filename, ext) \
     (strcasecmp(&filename[strlen(filename) - sizeof(ext) + 1], ext) == 0)
@@ -131,7 +136,12 @@ static esp_err_t adjust_handler_func(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "Adjust request received");
     char content[128] = {0};
-    int ret = httpd_req_recv(req, content, sizeof(content));
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "{\"error\":\"empty request\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
     ESP_LOGI(TAG, "Content: %s", content);
     char leg_str[16] = {0};
     int leg_value = 0;
@@ -172,7 +182,13 @@ static esp_err_t control_handler_func(httpd_req_t *req)
 
     ESP_LOGI(TAG, "Control request received");
     char content[128] = {0};
-    int ret = httpd_req_recv(req, content, sizeof(content));
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"empty request\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
     ESP_LOGI(TAG, "Content: %s", content);
 
     char function[16];
@@ -451,12 +467,19 @@ static esp_err_t brave_search_config_post_handler_func(httpd_req_t *req)
     httpd_resp_send(req, response, len);
     return ESP_OK;
 }
-
 static esp_err_t start_webserver(void)
 {
+    if (server_handle != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.stack_size = 1024 * 6;
+    config.stack_size = 1024 * 4;
     config.task_priority = 10;
+    config.max_open_sockets = 3;
+    config.backlog_conn = 2;
+    config.max_uri_handlers = 8;
+    config.lru_purge_enable = true;
     /* Use the URI wildcard matching function in order to
      * allow the same handler to respond to multiple different
      * target URIs which match the wildcard scheme */
@@ -517,27 +540,29 @@ static esp_err_t start_webserver(void)
         .user_ctx = NULL
     };
 
-    httpd_handle_t server = NULL;
-
     config.core_id = 0;
-    if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_register_uri_handler(server, &start_calibration_handler);
-        httpd_register_uri_handler(server, &exit_calibration_handler);
-        httpd_register_uri_handler(server, &adjust_handler);
-        httpd_register_uri_handler(server, &control_handler);
-        httpd_register_uri_handler(server, &brave_search_config_get_handler);
-        httpd_register_uri_handler(server, &brave_search_config_post_handler);
-        httpd_register_uri_handler(server, &static_handler);
-    } else {
-        goto exit;
+    esp_err_t err = httpd_start(&server_handle, &config);
+    if (err != ESP_OK) {
+        server_handle = NULL;
+        ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
+        return err;
     }
 
+    httpd_register_uri_handler(server_handle, &start_calibration_handler);
+    httpd_register_uri_handler(server_handle, &exit_calibration_handler);
+    httpd_register_uri_handler(server_handle, &adjust_handler);
+    httpd_register_uri_handler(server_handle, &control_handler);
+    httpd_register_uri_handler(server_handle, &brave_search_config_get_handler);
+    httpd_register_uri_handler(server_handle, &brave_search_config_post_handler);
+    httpd_register_uri_handler(server_handle, &static_handler);
+
     return ESP_OK;
-exit:
-    return ESP_FAIL;
 }
 
 void start_mdns_service(void) {
+#if CONFIG_IDF_TARGET_ESP32C3
+    ESP_LOGI(TAG, "MDNS disabled on ESP32-C3 to preserve SRAM; use the device IP address");
+#else
     esp_err_t err = mdns_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "MDNS init failed");
@@ -564,15 +589,28 @@ void start_mdns_service(void) {
         return;
     }
     ESP_LOGI(TAG, "MDNS service started");
+#endif
 }
 
 esp_err_t esp_hi_web_control_server_init(void)
 {
     servo_control_init();
-    start_mdns_service();
     esp_err_t err = start_webserver();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Web server start failed");
+        return err;
     }
-    return(err);
+    start_mdns_service();
+    return ESP_OK;
+}
+
+esp_err_t esp_hi_web_control_server_deinit(void)
+{
+    if (server_handle == NULL) {
+        return ESP_OK;
+    }
+
+    httpd_handle_t server = server_handle;
+    server_handle = NULL;
+    return httpd_stop(server);
 }

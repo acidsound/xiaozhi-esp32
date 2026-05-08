@@ -4,11 +4,15 @@
  */
 
 #include "mcp_server.h"
+#include "sdkconfig.h"
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <algorithm>
 #include <cstring>
 #include <esp_pthread.h>
+#include <exception>
+#include <new>
+#include <utility>
 
 #include "application.h"
 #include "display.h"
@@ -42,18 +46,30 @@ void McpServer::AddCommonTools() {
     // Do not add custom tools here.
     // Custom tools must be added in the board's InitializeTools function.
 
-    AddTool("self.get_device_status",
+#if CONFIG_IDF_TARGET_ESP32C3
+    const char* device_status_description =
+        "현재 기기 상태를 확인합니다. 볼륨, 네트워크, 배터리 상태가 필요할 때 사용하세요.";
+    const char* volume_description =
+        "스피커 볼륨을 0-100으로 설정합니다. 현재 값을 모르면 먼저 self.get_device_status를 호출하세요.";
+#else
+    const char* device_status_description =
         "Provides the real-time information of the device, including the current status of the audio speaker, screen, battery, network, etc.\n"
         "Use this tool for: \n"
         "1. Answering questions about current condition (e.g. what is the current volume of the audio speaker?)\n"
-        "2. As the first step to control the device (e.g. turn up / down the volume of the audio speaker, etc.)",
+        "2. As the first step to control the device (e.g. turn up / down the volume of the audio speaker, etc.)";
+    const char* volume_description =
+        "Set the volume of the audio speaker. If the current volume is unknown, you must call `self.get_device_status` tool first and then call this tool.";
+#endif
+
+    AddTool("self.get_device_status",
+        device_status_description,
         PropertyList(),
         [&board](const PropertyList& properties) -> ReturnValue {
             return board.GetDeviceStatusJson();
         });
 
     AddTool("self.audio_speaker.set_volume", 
-        "Set the volume of the audio speaker. If the current volume is unknown, you must call `self.get_device_status` tool first and then call this tool.",
+        volume_description,
         PropertyList({
             Property("volume", kPropertyTypeInteger, 0, 100)
         }), 
@@ -351,6 +367,7 @@ void McpServer::ParseCapabilities(const cJSON* capabilities) {
 }
 
 void McpServer::ParseMessage(const cJSON* json) {
+    try {
     // Check JSONRPC version
     auto version = cJSON_GetObjectItem(json, "jsonrpc");
     if (version == nullptr || !cJSON_IsString(version) || strcmp(version->valuestring, "2.0") != 0) {
@@ -433,6 +450,11 @@ void McpServer::ParseMessage(const cJSON* json) {
         ESP_LOGE(TAG, "Method not implemented: %s", method_str.c_str());
         ReplyError(id_int, "Method not implemented: " + method_str);
     }
+    } catch (const std::bad_alloc&) {
+        ESP_LOGE(TAG, "MCP message failed: out of memory");
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "MCP message failed: %s", e.what());
+    }
 }
 
 void McpServer::ReplyResult(int id, const std::string& result) {
@@ -443,7 +465,7 @@ void McpServer::ReplyResult(int id, const std::string& result) {
     if (payload.size() > 2000) {
         ESP_LOGI(TAG, "reply result: id=%d payload=%u bytes", id, static_cast<unsigned>(payload.size()));
     }
-    Application::GetInstance().SendMcpMessage(payload);
+    Application::GetInstance().SendMcpMessage(std::move(payload));
 }
 
 void McpServer::ReplyError(int id, const std::string& message) {
@@ -452,11 +474,15 @@ void McpServer::ReplyError(int id, const std::string& message) {
     payload += ",\"error\":{\"message\":\"";
     payload += message;
     payload += "\"}}";
-    Application::GetInstance().SendMcpMessage(payload);
+    Application::GetInstance().SendMcpMessage(std::move(payload));
 }
 
 void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools) {
+#if CONFIG_IDF_TARGET_ESP32C3
+    const int max_payload_size = 1400;
+#else
     const int max_payload_size = 8000;
+#endif
     std::string json = "{\"tools\":[";
     
     bool found_cursor = cursor.empty();
@@ -507,7 +533,6 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     } else {
         json += "],\"nextCursor\":\"" + next_cursor + "\"}";
     }
-    
     ReplyResult(id, json);
 }
 

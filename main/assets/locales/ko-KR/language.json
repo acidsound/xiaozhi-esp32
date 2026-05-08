@@ -19,7 +19,7 @@
     "SWITCH_TO_4G_NETWORK": "4G로 전환 중",
     "STANDBY": "대기",
     "CONNECT_TO": "연결 대상: ",
-    "CONNECTING": "연결 중",
+    "CONNECTING": "서버 연결 중",
     "CONNECTION_SUCCESSFUL": "연결 성공",
     "CONNECTED_TO": "연결됨: ",
     "LISTENING": "듣는 중",

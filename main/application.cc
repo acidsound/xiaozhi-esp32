@@ -9,16 +9,16 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
-
+#include "sdkconfig.h"
 #include <cstring>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <utility>
 
 #define TAG "Application"
-
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -521,7 +521,11 @@ void Application::InitializeProtocol() {
             return;
         }
         if (GetDeviceState() == kDeviceStateSpeaking) {
+#if CONFIG_BOARD_TYPE_ESP_HI && CONFIG_IDF_TARGET_ESP32C3
+            audio_service_.PushPacketToDecodeQueue(std::move(packet), true);
+#else
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
+#endif
         }
     });
     
@@ -558,8 +562,14 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(type)) {
+            return;
+        }
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
+            if (!cJSON_IsString(state)) {
+                return;
+            }
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     if (Board::GetInstance().IsExternalAudioOutputActive() ||
@@ -586,6 +596,9 @@ void Application::InitializeProtocol() {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
+#if CONFIG_BOARD_TYPE_ESP_HI && CONFIG_IDF_TARGET_ESP32C3
+                            vTaskDelay(pdMS_TO_TICKS(600));
+#endif
                             SetDeviceState(kDeviceStateListening);
                         }
                     }
@@ -786,7 +799,6 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
             return;
         }
     }
-
     SetListeningMode(mode);
 }
 
@@ -844,7 +856,6 @@ void Application::HandleWakeWordDetectedEvent() {
     if (!protocol_) {
         return;
     }
-
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
@@ -898,16 +909,17 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
     if (!protocol_->IsAudioChannelOpened() && !WaitForAudioChannelPreconnect()) {
         audio_service_.EnableWakeWordDetection(true);
+        SetDeviceState(kDeviceStateIdle);
         return;
     }
 
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
             audio_service_.EnableWakeWordDetection(true);
+            SetDeviceState(kDeviceStateIdle);
             return;
         }
     }
-
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Encode and send the wake word data to the server
@@ -1145,8 +1157,7 @@ bool Application::CanEnterSleepMode() {
     return true;
 }
 
-void Application::SendMcpMessage(const std::string& payload) {
-    // Always schedule to run in main task for thread safety
+void Application::SendMcpMessage(std::string payload) {
     Schedule([this, payload = std::move(payload)]() {
         if (protocol_) {
             protocol_->SendMcpMessage(payload);
@@ -1201,7 +1212,7 @@ void Application::BeginAudioInteraction() {
 }
 
 void Application::PreconnectAudioChannelIfNeeded() {
-#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2 || CONFIG_BOARD_TYPE_ESP_HI
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2
     if (!protocol_ || GetDeviceState() != kDeviceStateIdle || protocol_->IsAudioChannelOpened()) {
         return;
     }
@@ -1226,7 +1237,7 @@ void Application::PreconnectAudioChannelIfNeeded() {
 }
 
 void Application::PreconnectAudioChannelTask() {
-#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2 || CONFIG_BOARD_TYPE_ESP_HI
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2
     bool success = false;
     if (protocol_ && GetDeviceState() == kDeviceStateIdle && !protocol_->IsAudioChannelOpened()) {
         ESP_LOGI(TAG, "Preconnecting WebSocket audio channel");
@@ -1245,7 +1256,7 @@ void Application::PreconnectAudioChannelTask() {
 }
 
 bool Application::WaitForAudioChannelPreconnect(int timeout_ms) {
-#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2 || CONFIG_BOARD_TYPE_ESP_HI
+#if CONFIG_BOARD_TYPE_XIAO_XING_VQ2
     const int delay_ms = 50;
     int elapsed_ms = 0;
     while (audio_channel_preconnecting_.load() && elapsed_ms < timeout_ms) {

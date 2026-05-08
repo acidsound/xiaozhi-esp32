@@ -1,0 +1,152 @@
+<!--
+SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="format-detection" content="telephone=no">
+  <title>ESP-Hi</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="main.js"></script>
+  <script src="/nipplejs.min.js"></script>
+</head>
+
+<body>
+  <div class="tabs">
+    <div class="tab" data-tab="custom">동작 조합</div>
+    <div class="tab active" data-tab="control">조작</div>
+    <div class="tab" data-tab="config">서보 보정</div>
+    <div class="tab" data-tab="settings">설정</div>
+  </div>
+  <div class="content">
+    <div id="control" class="panel">
+      <div class="controls">
+        <div class="buttons-container" id="action-buttons"><span>기본 동작</span></div>
+        <div class="joystick-container" id="joystick">
+          <div class="joystick-hint">여기를 누른 채로 드래그하세요</div>
+          <div class="joystick-hint error" id="control-error"></div>
+        </div>
+      </div>
+    </div>
+    <div id="config" class="panel" style="display:none;">
+      <div class="config-area">
+        <div id="calibration-intro">
+          <h2>서보 보정 안내</h2>
+          <p>ESP-Hi 조립 후 서보 기준 위치가 같은 평면에 맞지 않을 수 있습니다. 이 상태에서는 ESP-Hi가 제대로 움직이지 않을 수 있으므로 보정이 필요합니다.</p>
+          <p>보정 순서:</p>
+          <ol>
+            <li>"서보 보정 모드 진입"을 누르면 ESP-Hi가 네 다리를 수평으로 맞추려고 시도합니다.</li>
+            <li>화면의 네 서보 버튼을 눌러 각도를 조금씩 조정하고, 네 다리가 몸체와 일직선이 되도록 맞춥니다. 맞출 수 없다면 다리와 서보 사이의 나사를 풀어 각도를 조정한 뒤 다시 조립하세요.</li>
+            <li>"서보 보정 모드 종료"를 누르면 ESP-Hi가 보정 모드를 종료합니다.</li>
+          </ol>
+          <img src="calibration.png" alt="서보 보정 예시" style="width: 100%;" />
+          <p><b>서보를 손으로 억지로 돌리지 마세요. 서보가 손상될 수 있습니다.</b></p>
+          <div class="calibration-buttons">
+            <button id="start-calibration" class="calibration-button">서보 보정 모드 진입</button>
+          </div>
+        </div>
+        <div id="calibration-interface" style="display:none;">
+          <div class="vehicle">
+            <div class="servo fl" data-pos="fl"><span class="label">앞 왼쪽</span><span class="value">0</span></div>
+            <div class="servo fr" data-pos="fr"><span class="label">앞 오른쪽</span><span class="value">0</span></div>
+            <div class="servo bl" data-pos="bl"><span class="label">뒤 왼쪽</span><span class="value">0</span></div>
+            <div class="servo br" data-pos="br"><span class="label">뒤 오른쪽</span><span class="value">0</span></div>
+            <div class="header"> ESP-Hi </div>
+          </div>
+          <div class="adjust">
+            <button id="minus">-</button>
+            <code id="value-display">0</code>
+            <button id="plus">+</button>
+          </div>
+          <div class="calibration-buttons">
+            <button id="exit-calibration" class="calibration-button">서보 보정 모드 종료</button>
+          </div>
+          <div class="error" id="config-error"></div>
+        </div>
+      </div>
+    </div>
+    <div id="custom" class="panel" style="display:none;">
+      <div class="custom-area">
+        <h2>사용자 동작 조합</h2>
+        <div class="custom-controls">
+          <div class="action-selector">
+            <div class="selector-group">
+              <label>동작:</label>
+              <select id="action-select">
+                <option value="">동작 선택...</option>
+                <optgroup label="기본 동작">
+                  <option value="1">엎드리기</option>
+                  <option value="2">인사</option>
+                  <option value="3">뒤로 젖히기</option>
+                  <option value="4">흔들기</option>
+                  <option value="5">앞뒤 흔들기</option>
+                  <option value="6">좌우 흔들기</option>
+                  <option value="7">악수</option>
+                  <option value="8">콕 찌르기</option>
+                  <option value="9">다리 떨기</option>
+                  <option value="10">앞으로 점프</option>
+                  <option value="11">뒤로 점프</option>
+                  <option value="12">다리 접기</option>
+                </optgroup>
+                <optgroup label="이동">
+                  <option value="F">앞으로</option>
+                  <option value="B">뒤로</option>
+                  <option value="L">왼쪽 회전</option>
+                  <option value="R">오른쪽 회전</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="delay-group">
+              <label>지연:</label>
+              <input type="number" id="delay-input" min="0" max="10" step="0.1" value="1">
+              <label>초</label>
+            </div>
+            <button id="add-action">추가</button>
+          </div>
+          <div class="action-sequence" id="action-sequence">
+            <div class="sequence-list"></div>
+          </div>
+          <div class="custom-buttons">
+            <button id="save-sequence" class="custom-button">저장</button>
+            <button id="play-sequence" class="custom-button">실행</button>
+          </div>
+          <div class="error" id="custom-error"></div>
+        </div>
+      </div>
+    </div>
+    <div id="settings" class="panel" style="display:none;">
+      <div class="settings-area">
+        <h2>웹 검색</h2>
+        <div class="settings-card">
+          <div class="setting-status">Web Search 키: <span id="brave-web-key-status">확인 중...</span></div>
+          <label for="brave-web-api-key">Web Search API 키</label>
+          <input type="password" id="brave-web-api-key" autocomplete="off" placeholder="Brave Web Search API 키 입력">
+          <div class="setting-status">LLM Context 키: <span id="brave-llm-context-key-status">확인 중...</span></div>
+          <label for="brave-llm-context-api-key">LLM Context API 키</label>
+          <input type="password" id="brave-llm-context-api-key" autocomplete="off" placeholder="Brave LLM Context API 키 입력">
+          <label class="setting-checkbox" for="brave-use-llm-context">
+            <input type="checkbox" id="brave-use-llm-context">
+            <span>자세한 조사와 쿼터 대체에 LLM Context 사용 허용</span>
+          </label>
+          <div class="settings-buttons">
+            <button id="save-brave-settings" class="settings-button">저장</button>
+            <button id="clear-brave-web-key" class="settings-button secondary">Web 키 삭제</button>
+            <button id="clear-brave-llm-context-key" class="settings-button secondary">LLM 키 삭제</button>
+          </div>
+          <div class="settings-note">키는 기기 NVS에만 저장되고 다시 표시되지 않습니다. 일반 검색은 Web Search를 사용합니다. LLM Context를 켜면 자세한 조사 요청과 쿼터 대체에 사용할 수 있습니다. 새 Brave Search 플랜은 두 입력란에 같은 키를 넣어도 됩니다.</div>
+          <div class="error" id="settings-error"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+
+</html>

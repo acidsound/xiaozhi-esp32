@@ -4,9 +4,11 @@
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
+#include "power_save_timer.h"
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
+#include <esp_err.h>
 #include <esp_wifi.h>
 #include <esp_event.h>
 
@@ -78,39 +80,82 @@ private:
     Button move_wake_button_;
     anim::EmojiWidget* display_ = nullptr;
     bool web_server_initialized_ = false;
+    bool web_server_start_pending_ = false;
+    bool web_control_suspended_ = false;
+    bool web_control_stopped_for_sleep_ = false;
+    PowerSaveTimer* power_save_timer_ = nullptr;
     led_strip_handle_t led_strip_;
     bool led_on_ = false;
 
 #ifdef CONFIG_ESP_HI_WEB_CONTROL_ENABLED
+    void StartWebControlServerAsync()
+    {
+        if (web_server_initialized_ || web_server_start_pending_ || web_control_suspended_) {
+            return;
+        }
+
+        web_server_start_pending_ = true;
+        BaseType_t result = xTaskCreate(
+            [](void* arg) {
+                EspHi* instance = static_cast<EspHi*>(arg);
+
+                vTaskDelay(pdMS_TO_TICKS(5000));
+
+                for (int attempt = 1; attempt <= 3 && !instance->web_server_initialized_ &&
+                        !instance->web_control_suspended_; ++attempt) {
+                    ESP_LOGI(TAG, "WiFi connected, init web control server (attempt %d)", attempt);
+                    esp_err_t err = esp_hi_web_control_server_init();
+                    if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+                        ESP_LOGI(TAG, "Web control server initialized");
+                        instance->web_server_initialized_ = true;
+                        break;
+                    }
+
+                    ESP_LOGW(TAG, "Failed to initialize web control server: %d", err);
+                    vTaskDelay(pdMS_TO_TICKS(3000));
+                }
+
+                instance->web_server_start_pending_ = false;
+                vTaskDelete(NULL);
+            },
+            "web_server_init",
+            1024 * 3, this, 5, nullptr);
+
+        if (result != pdPASS) {
+            web_server_start_pending_ = false;
+            ESP_LOGW(TAG, "Failed to create web control init task");
+        }
+    }
+
+    void StopWebControlServer()
+    {
+        web_control_suspended_ = true;
+        if (web_server_initialized_) {
+            esp_err_t err = esp_hi_web_control_server_deinit();
+            if (err == ESP_OK) {
+                web_server_initialized_ = false;
+            } else {
+                ESP_LOGW(TAG, "Failed to stop web control server: %d", err);
+            }
+        }
+    }
+
     static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                  int32_t event_id, void* event_data)
     {
         if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
-
-            xTaskCreate(
-                [](void* arg) {
-                    EspHi* instance = static_cast<EspHi*>(arg);
-                    
-                    vTaskDelay(5000 / portTICK_PERIOD_MS);
-
-                    if (!instance->web_server_initialized_) {
-                        ESP_LOGI(TAG, "WiFi connected, init web control server");
-                        esp_err_t err = esp_hi_web_control_server_init();
-                        if (err != ESP_OK) {
-                            ESP_LOGE(TAG, "Failed to initialize web control server: %d", err);
-                        } else {
-                            ESP_LOGI(TAG, "Web control server initialized");
-                            instance->web_server_initialized_ = true;
-                        }
-                    }
-
-                    vTaskDelete(NULL);
-                },
-                "web_server_init",
-                1024 * 10, arg, 5, nullptr);
+            EspHi* instance = static_cast<EspHi*>(arg);
+            instance->StartWebControlServerAsync();
         }
     }
 #endif //CONFIG_ESP_HI_WEB_CONTROL_ENABLED
+
+    void WakePowerSaveTimer()
+    {
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->WakeUp();
+        }
+    }
 
     void HandleMoveWakePressDown(int64_t current_time, int64_t &last_trigger_time, int &gesture_state)
     {
@@ -156,6 +201,7 @@ private:
                 if (interval < 100) {
                     ESP_LOGI(TAG, "gesture detected");
                     gesture_state = 0;
+                    WakePowerSaveTimer();
                     auto &app = Application::GetInstance();
                     app.ToggleChatState();
                 }
@@ -176,6 +222,7 @@ private:
                 EnterWifiConfigMode();
                 return;
             }
+            WakePowerSaveTimer();
             app.ToggleChatState();
         });
 
@@ -232,6 +279,26 @@ private:
         ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED,
                                                  &wifi_event_handler, this));
 #endif //CONFIG_ESP_HI_WEB_CONTROL_ENABLED
+    }
+
+    void InitializePowerSaveTimer()
+    {
+        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
+        power_save_timer_->OnEnterSleepMode([this]() {
+            if (display_ != nullptr) {
+                display_->SetPowerSaveMode(true);
+            }
+#if CONFIG_ESP_HI_WEB_CONTROL_ENABLED && CONFIG_IDF_TARGET_ESP32C3
+            web_control_stopped_for_sleep_ = true;
+            StopWebControlServer();
+#endif
+        });
+        power_save_timer_->OnExitSleepMode([this]() {
+            if (display_ != nullptr) {
+                display_->SetPowerSaveMode(false);
+            }
+        });
+        power_save_timer_->SetEnabled(true);
     }
 
     void InitializeSpi()
@@ -299,7 +366,12 @@ private:
             .br_gpio_num = BR_GPIO_NUM,
         };
 
-        servo_dog_ctrl_init(&config);
+        ESP_LOGI(TAG, "Servo GPIO map: FL=%d FR=%d BL=%d BR=%d",
+            config.fl_gpio_num, config.fr_gpio_num, config.bl_gpio_num, config.br_gpio_num);
+        esp_err_t err = servo_dog_ctrl_init(&config);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize servo dog controller: %s", esp_err_to_name(err));
+        }
 #endif
     }
 
@@ -307,8 +379,31 @@ private:
     {
         auto& mcp_server = McpServer::GetInstance();
 
+#if CONFIG_IDF_TARGET_ESP32C3
+        const char* wifi_info_description = "Wi-Fi SSID, IP, 웹 조작 주소를 확인합니다.";
+        const char* dog_basic_description = "로봇 기본 이동: forward, backward, turn_left, turn_right, stop.";
+        const char* dog_advanced_description =
+            "로봇 동작: sway_back_forth, lay_down, sway, retract_legs, shake_hand, shake_back_legs, jump_forward.";
+        const char* light_get_description = "조명 켜짐 상태를 확인합니다.";
+        const char* light_on_description = "조명을 켭니다.";
+        const char* light_off_description = "조명을 끕니다.";
+        const char* light_rgb_description = "조명 RGB 색을 0-255 값으로 설정합니다.";
+#else
+        const char* wifi_info_description =
+            "현재 Wi-Fi 네트워크 정보를 확인합니다. 사용자가 IP 주소, 웹 조작 주소, 같은 네트워크에서 접속할 주소, SSID, 신호 세기를 물어보면 이 도구를 사용하세요.";
+        const char* dog_basic_description = "机器人的基础动作。机器人可以做以下基础动作：\n"
+            "forward: 向前移动\nbackward: 向后移动\nturn_left: 向左转\nturn_right: 向右转\nstop: 立即停止当前动作";
+        const char* dog_advanced_description = "机器人的扩展动作。机器人可以做以下扩展动作：\n"
+            "sway_back_forth: 前后摇摆\nlay_down: 趴下\nsway: 左右摇摆\nretract_legs: 收回腿部\n"
+            "shake_hand: 握手\nshake_back_legs: 伸懒腰\njump_forward: 向前跳跃";
+        const char* light_get_description = "获取灯是否打开";
+        const char* light_on_description = "打开灯";
+        const char* light_off_description = "关闭灯";
+        const char* light_rgb_description = "设置RGB颜色";
+#endif
+
         mcp_server.AddTool("self.network.get_wifi_info",
-            "현재 Wi-Fi 네트워크 정보를 확인합니다. 사용자가 IP 주소, 웹 조작 주소, 같은 네트워크에서 접속할 주소, SSID, 신호 세기를 물어보면 이 도구를 사용하세요.",
+            wifi_info_description,
             PropertyList(),
             [this](const PropertyList& properties) -> ReturnValue {
                 (void)properties;
@@ -316,10 +411,22 @@ private:
             });
 
         mcp_server.AddTool("self.web.search",
+#if CONFIG_IDF_TARGET_ESP32C3
+            "Brave Search API로 최신 웹 정보를 확인합니다. 최근/오늘/검색 요청에 사용하세요. ESP32-C3에서는 결과 1개만 반환합니다. ok=true이면 핵심을 한국어로 요약하고 출처 제목과 URL을 말하세요. ok=false이면 실패 이유와 조치를 짧게 안내하세요.",
+#else
             "Brave Search API로 최신 웹 정보를 검색하거나 조사합니다. 사용자가 '검색해줘', '알아봐줘', '찾아봐줘', '최근', '오늘', '요즘'처럼 빠른 최신 정보나 뉴스 확인을 요청하면 mode='web'을 사용하세요. 사용자가 '조사해줘', '자세히 알아봐줘', '근거까지', '출처 내용을 보고', '본문 기준으로', '비교해서', '분석해줘', '왜 그런지'처럼 깊이 있는 확인을 요청하면 mode='context'를 사용하세요. mode='context' 결과가 ok=true이면 단순히 검색했다고 하지 말고 '조사해봤다', '출처 내용을 살펴봤다'처럼 말하고, 근거를 자연스럽게 요약하세요. 결과를 그대로 읽지 말고 핵심만 한국어로 요약하고, 중요한 출처 1-3개를 함께 말하세요. quota_warning=true이면 답변 끝에 quota_warning_message를 짧게 덧붙이세요. ok=false 응답이면 기다리거나 재시도하지 말고 실패 이유와 필요한 조치를 짧게 안내한 뒤, 일반 지식으로 답할 수 있는 범위만 답하세요.",
+#endif
+#if CONFIG_IDF_TARGET_ESP32C3
             PropertyList({
                 Property("query", kPropertyTypeString),
-                Property("max_results", kPropertyTypeInteger, 3, 1, 3),
+            }), [](const PropertyList& properties) -> ReturnValue {
+                std::string query = properties["query"].value<std::string>();
+                return brave_search::SearchText(query, 1, "web");
+            });
+#else
+            PropertyList({
+                Property("query", kPropertyTypeString),
+                Property("max_results", kPropertyTypeInteger, 1, 1, 3),
                 Property("mode", kPropertyTypeString, "auto"),
             }), [](const PropertyList& properties) -> ReturnValue {
                 std::string query = properties["query"].value<std::string>();
@@ -327,7 +434,9 @@ private:
                 std::string mode = properties["mode"].value<std::string>();
                 return brave_search::Search(query, max_results, mode);
             });
+#endif
 
+#if !CONFIG_IDF_TARGET_ESP32C3
         mcp_server.AddTool("self.web.search.get_config_status",
             "Brave Search 설정 상태를 확인합니다. 실제 API 키 문자열은 이 도구의 반환값에 존재하지 않고 configured 여부만 반환됩니다.",
             PropertyList(),
@@ -335,10 +444,10 @@ private:
                 (void)properties;
                 return brave_search::GetConfigStatus();
             });
+#endif
         
         // 基础动作控制
-        mcp_server.AddTool("self.dog.basic_control", "机器人的基础动作。机器人可以做以下基础动作：\n"
-            "forward: 向前移动\nbackward: 向后移动\nturn_left: 向左转\nturn_right: 向右转\nstop: 立即停止当前动作", 
+        mcp_server.AddTool("self.dog.basic_control", dog_basic_description,
             PropertyList({
                 Property("action", kPropertyTypeString),
             }), [this](const PropertyList& properties) -> ReturnValue {
@@ -360,9 +469,7 @@ private:
             });
         
         // 扩展动作控制
-        mcp_server.AddTool("self.dog.advanced_control", "机器人的扩展动作。机器人可以做以下扩展动作：\n"
-            "sway_back_forth: 前后摇摆\nlay_down: 趴下\nsway: 左右摇摆\nretract_legs: 收回腿部\n"
-            "shake_hand: 握手\nshake_back_legs: 伸懒腰\njump_forward: 向前跳跃", 
+        mcp_server.AddTool("self.dog.advanced_control", dog_advanced_description,
             PropertyList({
                 Property("action", kPropertyTypeString),
             }), [this](const PropertyList& properties) -> ReturnValue {
@@ -391,23 +498,23 @@ private:
             });
 
         // 灯光控制
-        mcp_server.AddTool("self.light.get_power", "获取灯是否打开", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+        mcp_server.AddTool("self.light.get_power", light_get_description, PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
             return led_on_;
         });
 
-        mcp_server.AddTool("self.light.turn_on", "打开灯", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+        mcp_server.AddTool("self.light.turn_on", light_on_description, PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
             SetLedColor(0xFF, 0xFF, 0xFF);
             led_on_ = true;
             return true;
         });
 
-        mcp_server.AddTool("self.light.turn_off", "关闭灯", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+        mcp_server.AddTool("self.light.turn_off", light_off_description, PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
             SetLedColor(0x00, 0x00, 0x00);
             led_on_ = false;
             return true;
         });
 
-        mcp_server.AddTool("self.light.set_rgb", "设置RGB颜色", PropertyList({
+        mcp_server.AddTool("self.light.set_rgb", light_rgb_description, PropertyList({
             Property("r", kPropertyTypeInteger, 0, 255),
             Property("g", kPropertyTypeInteger, 0, 255),
             Property("b", kPropertyTypeInteger, 0, 255)
@@ -431,7 +538,25 @@ public:
         InitializeIot();
         InitializeSpi();
         InitializeLcdDisplay();
+        InitializePowerSaveTimer();
         InitializeTools();
+    }
+
+    virtual void OnAudioInteractionStarting() override
+    {
+        SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        WakePowerSaveTimer();
+    }
+
+    virtual void OnAudioInteractionFinished() override
+    {
+#if CONFIG_ESP_HI_WEB_CONTROL_ENABLED && CONFIG_IDF_TARGET_ESP32C3
+        if (web_control_stopped_for_sleep_) {
+            web_control_stopped_for_sleep_ = false;
+            web_control_suspended_ = false;
+            StartWebControlServerAsync();
+        }
+#endif
     }
 
     virtual AudioCodec* GetAudioCodec() override

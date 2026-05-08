@@ -1,6 +1,7 @@
 #include "protocol.h"
 
 #include <esp_log.h>
+#include <new>
 
 #define TAG "Protocol"
 
@@ -74,8 +75,19 @@ void Protocol::SendStopListening() {
 }
 
 void Protocol::SendMcpMessage(const std::string& payload) {
-    std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"mcp\",\"payload\":" + payload + "}";
-    SendText(message);
+    try {
+        std::string message;
+        message.reserve(session_id_.size() + payload.size() + 43);
+        message.append("{\"session_id\":\"");
+        message.append(session_id_);
+        message.append("\",\"type\":\"mcp\",\"payload\":");
+        message.append(payload);
+        message.push_back('}');
+        SendText(message);
+    } catch (const std::bad_alloc&) {
+        ESP_LOGE(TAG, "Failed to allocate MCP message: payload=%u bytes", static_cast<unsigned>(payload.size()));
+        SetError("Out of memory");
+    }
 }
 
 bool Protocol::IsTimeout() const {

@@ -514,7 +514,17 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
-            audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
+            if (!audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(1000), [this]() {
+                    return service_stopped_ || audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE;
+                })) {
+                ESP_LOGW(TAG, "Decode queue backpressure timeout: decode=%u playback=%u",
+                    static_cast<unsigned>(audio_decode_queue_.size()),
+                    static_cast<unsigned>(audio_playback_queue_.size()));
+                return false;
+            }
+            if (service_stopped_) {
+                return false;
+            }
         } else {
             return false;
         }

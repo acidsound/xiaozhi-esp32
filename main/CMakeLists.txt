@@ -259,7 +259,8 @@ elseif(CONFIG_BOARD_TYPE_ESP_SPOT_C5)
 elseif(CONFIG_BOARD_TYPE_ESP_HI)
     set(BOARD_TYPE "esp-hi")
     # Set ESP_HI emoji directory for DEFAULT_ASSETS_EXTRA_FILES
-    set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_BINARY_DIR}/emoji")
+    set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_BINARY_DIR}/emoji_assets")
+    set(USE_ASSET_SOUNDS ON)
 elseif(CONFIG_BOARD_TYPE_XIAO_XING_VQ2)
     set(BOARD_TYPE "xiao-xing-vq2")
     set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
@@ -1026,6 +1027,13 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
     )
 endif()
 
+if(CONFIG_BOARD_TYPE_ESP_HI)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+        esp-tls
+        mbedtls
+    )
+endif()
+
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${EMBED_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
@@ -1106,23 +1114,21 @@ endif()
 if(CONFIG_BOARD_TYPE_ESP_HI)
 set(URL "https://github.com/espressif2022/image_player/raw/main/test_apps/test_8bit")
 set(EMOJI_DIR "${CMAKE_BINARY_DIR}/emoji")
+set(EMOJI_ASSETS_DIR "${CMAKE_BINARY_DIR}/emoji_assets")
 file(MAKE_DIRECTORY ${EMOJI_DIR})
+file(REMOVE_RECURSE ${EMOJI_ASSETS_DIR})
+file(MAKE_DIRECTORY ${EMOJI_ASSETS_DIR})
 
-# List all files to download
+# List only ESP-Hi runtime emoji files. The startup bubble/connecting animation is intentionally omitted.
 set(FILES_TO_DOWNLOAD "")
-list(APPEND FILES_TO_DOWNLOAD "Anger_enter.aaf" "Anger_loop.aaf" "Anger_return.aaf")
-list(APPEND FILES_TO_DOWNLOAD "happy_enter.aaf" "happy_loop.aaf" "happ_return.aaf")
-list(APPEND FILES_TO_DOWNLOAD "sad_enter.aaf" "sad_loop.aaf" "sad_return.aaf")
-list(APPEND FILES_TO_DOWNLOAD "scorn_enter.aaf" "scorn_loop.aaf" "scorn_return.aaf")
-list(APPEND FILES_TO_DOWNLOAD "left_enter.aaf" "left_loop.aaf" "left_return.aaf")
-list(APPEND FILES_TO_DOWNLOAD "right_enter.aaf" "right_loop.aaf" "right_return.aaf")
-list(APPEND FILES_TO_DOWNLOAD "asking.aaf" "blink_once.aaf" "blink_quick.aaf")
-list(APPEND FILES_TO_DOWNLOAD "connecting.aaf" "panic_enter.aaf" "panic_loop.aaf")
-list(APPEND FILES_TO_DOWNLOAD "panic_return.aaf" "wake.aaf")
+list(APPEND FILES_TO_DOWNLOAD "Anger_loop.aaf" "asking.aaf" "blink_quick.aaf")
+list(APPEND FILES_TO_DOWNLOAD "happy_loop.aaf" "panic_loop.aaf" "sad_loop.aaf")
+list(APPEND FILES_TO_DOWNLOAD "scorn_loop.aaf" "wake.aaf")
 
 foreach(FILENAME IN LISTS FILES_TO_DOWNLOAD)
     set(REMOTE_FILE "${URL}/${FILENAME}")
     set(LOCAL_FILE "${EMOJI_DIR}/${FILENAME}")
+    set(ASSET_FILE "${EMOJI_ASSETS_DIR}/${FILENAME}")
 
     # Check if local file exists
     if(EXISTS ${LOCAL_FILE})
@@ -1136,6 +1142,7 @@ foreach(FILENAME IN LISTS FILES_TO_DOWNLOAD)
             message(FATAL_ERROR "Failed to download ${FILENAME} from ${URL}")
         endif()
     endif()
+    configure_file(${LOCAL_FILE} ${ASSET_FILE} COPYONLY)
 endforeach()
 
 endif()

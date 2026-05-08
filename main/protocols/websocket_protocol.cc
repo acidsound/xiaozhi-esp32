@@ -3,8 +3,10 @@
 #include "system_info.h"
 #include "application.h"
 #include "settings.h"
+#include "sdkconfig.h"
 
 #include <cstring>
+#include <string_view>
 #include <cJSON.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
@@ -113,11 +115,20 @@ bool WebsocketProtocol::OpenAudioChannel() {
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
+                    if (len < sizeof(BinaryProtocol2)) {
+                        ESP_LOGE(TAG, "Invalid binary protocol v2 packet: %u bytes", static_cast<unsigned>(len));
+                        return;
+                    }
                     BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
                     bp2->version = ntohs(bp2->version);
                     bp2->type = ntohs(bp2->type);
                     bp2->timestamp = ntohl(bp2->timestamp);
                     bp2->payload_size = ntohl(bp2->payload_size);
+                    if (bp2->payload_size > len - sizeof(BinaryProtocol2)) {
+                        ESP_LOGE(TAG, "Invalid binary protocol v2 payload: %u/%u bytes",
+                            static_cast<unsigned>(bp2->payload_size), static_cast<unsigned>(len));
+                        return;
+                    }
                     auto payload = (uint8_t*)bp2->payload;
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -126,9 +137,18 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
                     }));
                 } else if (version_ == 3) {
+                    if (len < sizeof(BinaryProtocol3)) {
+                        ESP_LOGE(TAG, "Invalid binary protocol v3 packet: %u bytes", static_cast<unsigned>(len));
+                        return;
+                    }
                     BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
                     bp3->type = bp3->type;
                     bp3->payload_size = ntohs(bp3->payload_size);
+                    if (bp3->payload_size > len - sizeof(BinaryProtocol3)) {
+                        ESP_LOGE(TAG, "Invalid binary protocol v3 payload: %u/%u bytes",
+                            static_cast<unsigned>(bp3->payload_size), static_cast<unsigned>(len));
+                        return;
+                    }
                     auto payload = (uint8_t*)bp3->payload;
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -146,8 +166,27 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 }
             }
         } else {
+#if CONFIG_BOARD_TYPE_ESP_HI && CONFIG_IDF_TARGET_ESP32C3
+            // ESP-Hi has no text UI. Drop display-only transcript frames before
+            // cJSON parsing so long answers do not compete with audio buffers.
+            std::string_view frame(data, len);
+            if (frame.find("\"sentence_start\"") != std::string_view::npos &&
+                    frame.find("\"tts\"") != std::string_view::npos) {
+                last_incoming_time_ = std::chrono::steady_clock::now();
+                return;
+            }
+            if (frame.find("\"type\"") != std::string_view::npos &&
+                    frame.find("\"stt\"") != std::string_view::npos) {
+                last_incoming_time_ = std::chrono::steady_clock::now();
+                return;
+            }
+#endif
             // Parse JSON data
             auto root = cJSON_ParseWithLength(data, len);
+            if (root == nullptr) {
+                ESP_LOGE(TAG, "Failed to parse websocket JSON: %u bytes", static_cast<unsigned>(len));
+                return;
+            }
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
                 if (strcmp(type->valuestring, "hello") == 0) {

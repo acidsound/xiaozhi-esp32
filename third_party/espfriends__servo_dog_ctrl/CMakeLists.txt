@@ -7,6 +7,8 @@ if(CONFIG_ESP_HI_WEB_CONTROL_ENABLED)
     list(APPEND EMBED_FILES "assets/favicon.ico" "assets/nipplejs.min.js")
     if(CONFIG_LANGUAGE_ZH_CN)
         list(APPEND EMBED_FILES "assets/index.html" "assets/calibration.png" "assets/main.js" "assets/styles.css")
+    elseif(CONFIG_LANGUAGE_KO_KR)
+        list(APPEND EMBED_FILES "assets_ko/index.html" "assets_en/calibration.png" "assets_ko/main.js" "assets_en/styles.css")
     else()
         list(APPEND EMBED_FILES "assets_en/index.html" "assets_en/calibration.png" "assets_en/main.js" "assets_en/styles.css")
     endif()
@@ -15,5 +17,5 @@ endif()
 idf_component_register(SRCS ${SRCS}
                     INCLUDE_DIRS "include"
                     PRIV_INCLUDE_DIRS "priv_include"
-                    PRIV_REQUIRES "esp_http_server" "nvs_flash"
+                    PRIV_REQUIRES "esp_http_server" "nvs_flash" "esp_timer"
                     EMBED_FILES ${EMBED_FILES})
